@@ -56,14 +56,15 @@ class MoELayer(nn.Module):
     """
 
     def __init__(self, d_model, n_experts, top_k, n_shared=1, expert_dim=None,
-                 capacity_factor=1.25, z_loss_gamma=0.001, bias_decay=0.1,
-                 bias=False, noise_std=0.01):
+                 capacity_factor=1.25, z_loss_gamma=0.0001, bias_decay=0.1,
+                 bias=False, noise_std=0.01, load_balance_gamma=0.0):
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
         self.n_shared = n_shared
         self.capacity_factor = capacity_factor
         self.z_loss_gamma = z_loss_gamma
+        self.load_balance_gamma = load_balance_gamma
         self.bias_decay = bias_decay
         self.noise_std = noise_std
 
@@ -133,7 +134,7 @@ class MoELayer(nn.Module):
     def _router_z_loss(self, logits):
         """z-loss: penalize large router logits to stabilize training."""
         if self.z_loss_gamma <= 0:
-            return 0.0
+            return torch.tensor(0.0, device=logits.device)
         logsumexp = torch.logsumexp(logits, dim=-1)
         z_loss = self.z_loss_gamma * (logsumexp ** 2).mean()
         return z_loss
@@ -167,6 +168,14 @@ class MoELayer(nn.Module):
 
         # 3) Softmax + top-k
         probs = F.softmax(biased_scores, dim=-1)
+
+        # Optional differentiable load-balance loss computed from expected probs
+        if self.load_balance_gamma and self.load_balance_gamma > 0.0:
+            p_mean = probs.mean(dim=0)  # expected token probability per expert
+            target = torch.full_like(p_mean, 1.0 / float(self.n_experts))
+            lb_loss = self.load_balance_gamma * ((p_mean - target) ** 2).sum()
+        else:
+            lb_loss = torch.tensor(0.0, device=probs.device)
         topk_w, topk_i = probs.topk(self.top_k, dim=-1)  # (N, top_k) each
         topk_w = topk_w / (topk_w.sum(dim=-1, keepdim=True) + 1e-9)
 
@@ -210,8 +219,19 @@ class MoELayer(nn.Module):
             self.last_total = N
             self._update_expert_bias(counts, N)
 
-        # 8) z-loss
-        aux_loss = self._router_z_loss(scores)
+        # 8) z-loss + optional load-balance loss
+        z_loss = self._router_z_loss(scores)
+        aux_loss = z_loss + lb_loss
+
+        # record last scalar values for logging
+        try:
+            self.last_z_loss = z_loss.detach()
+        except Exception:
+            self.last_z_loss = torch.tensor(0.0, device=out.device)
+        try:
+            self.last_load_balance_loss = lb_loss.detach()
+        except Exception:
+            self.last_load_balance_loss = torch.tensor(0.0, device=out.device)
 
         out = out.reshape(B, T, C)
         if orig_ndim == 2:
