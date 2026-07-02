@@ -55,7 +55,7 @@ num_layers = 16
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
-seq_len = 720
+seq_len = 840
 batch_size = 4
 grad_accum = 16
 lr = 25e-5
@@ -310,6 +310,7 @@ def main():
             if micro >= grad_accum:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
                 opt.step()
+                opt.zero_grad()
                 step += 1
                 micro = 0
 
@@ -355,7 +356,9 @@ def main():
         if micro > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
             opt.step()
+            opt.zero_grad()
             step += 1
+            micro = 0
 
         epoch += 1
         print(f"── Epoch {epoch} done: {step} steps ──")
