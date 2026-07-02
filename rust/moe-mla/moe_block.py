@@ -58,10 +58,10 @@ class LayerWithMoE(nn.Module):
         top_k=2,
         n_shared=1,
         expert_dim=None,
-        capacity_factor=1.25,
+        capacity_factor=1.35,
         z_loss_gamma=0.001,
         bias_decay=0.1,
-        noise_std=0.01,
+        noise_std=0.005,
         layer_idx=0,
         num_layers=1,
     ):
@@ -183,8 +183,8 @@ class MoETransformer(nn.Module):
                  mla_d_c=None, mla_d_c1=None,
                  mla_d_rotate=None, mla_block_size=128,
                  use_moe=False, n_experts=8, top_k=2, n_shared=1,
-                 expert_dim=None, capacity_factor=1.25, z_loss_gamma=0.001,
-                 bias_decay=1e-3, noise_std=0.01,
+                 expert_dim=None, capacity_factor=1.35, z_loss_gamma=0.001,
+                 bias_decay=1e-3, noise_std=0.005,
                  n_dense_start=3, n_dense_end=3):
         super().__init__()
 
