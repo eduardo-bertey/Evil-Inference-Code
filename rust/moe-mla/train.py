@@ -311,6 +311,7 @@ def main():
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
 
                 if step % 10 == 0:
+                    # Per-parameter top gradients (as before)
                     grad_stats = []
                     for name, param in model.named_parameters():
                         if param.grad is None:
@@ -323,7 +324,38 @@ def main():
                         f"{name.split('.')[-1]} norm={norm:.4g} max={mx:.4g}"
                         for name, norm, mx in top_stats
                     )
-                    print(f"  Gradients: {grad_report}")
+                    print(f"  Gradients (top params): {grad_report}")
+
+                    # Per-layer gradient norms (aggregate over parameters in each layer)
+                    try:
+                        layer_reports = []
+                        for li, layer in enumerate(model.transformer.layers):
+                            sq = 0.0
+                            for p in layer.parameters():
+                                if p.grad is None:
+                                    continue
+                                g = p.grad
+                                # accumulate squared norms
+                                ng = float(g.norm().item())
+                                sq += ng * ng
+                            ln = math.sqrt(sq) if sq > 0.0 else 0.0
+                            layer_reports.append(f"L{li}={ln:.4g}")
+
+                        # Embedding grad
+                        emb_norm = 0.0
+                        if hasattr(model, 'embedding') and getattr(model.embedding, 'weight', None) is not None:
+                            ew = model.embedding.weight
+                            if ew.grad is not None:
+                                emb_norm = float(ew.grad.norm().item())
+
+                        # Print embedding + first/last few layers to keep line manageable
+                        if len(layer_reports) <= 12:
+                            layer_str = " ".join(layer_reports)
+                        else:
+                            layer_str = " ".join(layer_reports[:6]) + " ... " + " ".join(layer_reports[-6:])
+                        print(f"  Layer grads: Emb={emb_norm:.4g} | {layer_str}")
+                    except Exception as e:
+                        print(f"  Layer grad reporting failed: {e}")
 
                 opt.step()
                 opt.zero_grad()
