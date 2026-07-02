@@ -21,7 +21,7 @@ class BPEWrapper:
 
 
 @torch.no_grad()
-def generate_sample(model, tokenizer, device, prompt="hola", max_new=100):
+def generate_sample(model, tokenizer, device, prompt="hola", max_new=30):
     model.eval()
     x = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
     out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40, top_p=0.9,
@@ -55,7 +55,7 @@ num_layers = 16
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
-seq_len = 840
+seq_len = 1024
 batch_size = 4
 grad_accum = 16
 lr = 25e-5
