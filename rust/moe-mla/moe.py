@@ -57,7 +57,7 @@ class MoELayer(nn.Module):
 
     def __init__(self, d_model, n_experts, top_k, n_shared=1, expert_dim=None,
                  capacity_factor=1.25, z_loss_gamma=0.0001, bias_decay=0.1,
-                 bias=False, noise_std=0.01, load_balance_gamma=0.0):
+                 bias=False, noise_std=0.01, load_balance_gamma=0.0001):
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
