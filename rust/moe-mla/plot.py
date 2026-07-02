@@ -51,7 +51,7 @@ class PlotManager:
                 print(f"No remote history ({e}), starting fresh")
         return []
 
-        def log(self, step, loss, lr=None, tps=None, aux_loss=None,
+    def log(self, step, loss, lr=None, tps=None, aux_loss=None,
             grad_norm=None, moe_dist=None, z_loss=None, load_balance_loss=None):
         """Append one row to history and save JSON."""
         entry = {"step": step, "loss": loss, "time": time.time()}
