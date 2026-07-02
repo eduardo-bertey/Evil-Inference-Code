@@ -143,9 +143,16 @@ class PlotManager:
             for idx, layer in enumerate(moe_layers):
                 r, c = divmod(idx, 4)
                 ax = fig.add_subplot(gs[r + 1, c])
-                series = [[e["moe_dist"][layer][ei] for e in moe_entries]
-                          for ei in range(len(moe_entries[0]["moe_dist"][layer]))]
-                ax.stackplot(ms, *series, alpha=0.6)
+                normalized_series = []
+                n_experts = len(moe_entries[0]["moe_dist"][layer])
+                for ei in range(n_experts):
+                    series = []
+                    for e in moe_entries:
+                        layer_vals = e["moe_dist"][layer]
+                        total = sum(layer_vals) or 1.0
+                        series.append(float(layer_vals[ei]) / total * 100.0)
+                    normalized_series.append(series)
+                ax.stackplot(ms, *normalized_series, alpha=0.6)
                 ax.set_title(layer, fontsize=9)
                 ax.set_ylim(0, 100)
                 if r < n_rows - 1:
