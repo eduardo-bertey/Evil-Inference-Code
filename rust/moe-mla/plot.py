@@ -51,8 +51,8 @@ class PlotManager:
                 print(f"No remote history ({e}), starting fresh")
         return []
 
-    def log(self, step, loss, lr=None, tps=None, aux_loss=None,
-            grad_norm=None, moe_dist=None):
+        def log(self, step, loss, lr=None, tps=None, aux_loss=None,
+            grad_norm=None, moe_dist=None, z_loss=None, load_balance_loss=None):
         """Append one row to history and save JSON."""
         entry = {"step": step, "loss": loss, "time": time.time()}
         if lr is not None:
@@ -65,6 +65,10 @@ class PlotManager:
             entry["grad_norm"] = grad_norm
         if moe_dist is not None:
             entry["moe_dist"] = moe_dist
+        if z_loss is not None:
+            entry["z_loss"] = z_loss
+        if load_balance_loss is not None:
+            entry["load_balance_loss"] = load_balance_loss
         self.history.append(entry)
         with open(self.history_file, "w") as f:
             json.dump(self.history, f, indent=2)
@@ -86,11 +90,20 @@ class PlotManager:
         ax1.set_xlabel("step")
         ax1.set_ylabel("loss", color="tab:blue")
         has_aux = any("aux_loss" in e for e in self.history)
-        if has_aux:
-            aux = [e.get("aux_loss", 0) for e in self.history]
+        has_z = any("z_loss" in e for e in self.history)
+        has_lb = any("load_balance_loss" in e for e in self.history)
+        if has_aux or has_z or has_lb:
             ax2 = ax1.twinx()
-            ax2.plot(steps, aux, label="aux_loss", alpha=0.5, color="tab:orange")
-            ax2.set_ylabel("aux_loss", color="tab:orange")
+            if has_aux:
+                aux = [e.get("aux_loss", 0) for e in self.history]
+                ax2.plot(steps, aux, label="aux_loss", alpha=0.6, color="tab:orange")
+            if has_z:
+                z = [e.get("z_loss", 0) for e in self.history]
+                ax2.plot(steps, z, label="z_loss", alpha=0.6, color="tab:green")
+            if has_lb:
+                lb = [e.get("load_balance_loss", 0) for e in self.history]
+                ax2.plot(steps, lb, label="load_balance_loss", alpha=0.6, color="tab:purple", linestyle="--")
+            ax2.set_ylabel("aux/z/lb", color="tab:orange")
         ax1.set_title(f"Training loss (step {step})")
         fig.legend(loc="upper right")
         ax1.grid(True, alpha=0.3)
