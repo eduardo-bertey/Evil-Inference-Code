@@ -347,8 +347,7 @@ def main():
                     state.pop("head.emb_weight", None)
                     ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx if not test_mode else 0, "model": state}
                     torch.save(ckpt, ckpt_path)
-                    model.state_dict_to_safetensors(safe_path)
-                    pusher.maybe_push(ckpt_path, safe_path, tok_path, step)
+                    pusher.maybe_push(ckpt_path, None, tok_path, step)
                     pm.plot(step)
                     pm.plot_grad_moe(step)
                     pm.upload(step)
@@ -377,7 +376,7 @@ def main():
     if not test_mode and hf:
         ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx, "model": model.state_dict()}
         torch.save(ckpt, ckpt_path)
-        hf.upload_checkpoint(ckpt_path, safe_path, tok_path, step)
+        hf.upload_checkpoint(ckpt_path, tok_path, step)
 
     print(f"Done! {step} steps in {time.time()-t0:.1f}s")
 
