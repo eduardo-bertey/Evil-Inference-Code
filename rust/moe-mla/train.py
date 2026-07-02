@@ -309,6 +309,22 @@ def main():
 
             if micro >= grad_accum:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
+
+                if step % 10 == 0:
+                    grad_stats = []
+                    for name, param in model.named_parameters():
+                        if param.grad is None:
+                            continue
+                        g = param.grad
+                        grad_stats.append((name, g.norm().item(), g.abs().max().item()))
+                    grad_stats.sort(key=lambda x: x[1], reverse=True)
+                    top_stats = grad_stats[:6]
+                    grad_report = ", ".join(
+                        f"{name.split('.')[-1]} norm={norm:.4g} max={mx:.4g}"
+                        for name, norm, mx in top_stats
+                    )
+                    print(f"  Gradients: {grad_report}")
+
                 opt.step()
                 opt.zero_grad()
                 step += 1

@@ -92,6 +92,14 @@ class StreamingDataset:
                 f.write(text)
                 written += tam
 
+    def _download_and_load(self):
+        """Download block at self.block_idx and load tokens."""
+        self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
+        self.download_block()
+        with open(self._path, "r", encoding="utf-8") as f:
+            text = f.read()
+        self._tokens = self._tokenizer.encode(text)
+
     def next_block(self):
         # Delete old block file to free disk
         old_path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
@@ -100,13 +108,14 @@ class StreamingDataset:
         # Drop old tokens before loading new ones
         self._tokens = None
         self.block_idx += 1
-        self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
-        self.download_block()
-        with open(self._path, "r", encoding="utf-8") as f:
-            text = f.read()
-        self._tokens = self._tokenizer.encode(text)
-        text = None
-        print(f"Loaded block {self.block_idx}: {len(self._tokens)} tokens")
+        self._download_and_load()
+        # If block is too small, dataset is exhausted — wrap to 0
+        if len(self._tokens) < 1000:
+            os.remove(self._path)
+            print(f"  Dataset exhausted at block {self.block_idx}, wrapping to block 0")
+            self.block_idx = 0
+            self._download_and_load()
+        print(f"  Loaded block {self.block_idx}: {len(self._tokens)} tokens")
 
     def get_tokens(self):
         if self._tokens is None:
