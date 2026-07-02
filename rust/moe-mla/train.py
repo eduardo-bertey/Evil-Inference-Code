@@ -308,7 +308,7 @@ def main():
             micro += 1
 
             if micro >= grad_accum:
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
                 opt.step()
                 step += 1
                 micro = 0
