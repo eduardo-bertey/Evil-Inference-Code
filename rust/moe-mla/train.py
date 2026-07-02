@@ -353,7 +353,7 @@ def main():
                     pm.upload(step)
 
         if micro > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
             opt.step()
             step += 1
 
