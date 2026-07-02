@@ -57,7 +57,7 @@ class MoELayer(nn.Module):
 
     def __init__(self, d_model, n_experts, top_k, n_shared=1, expert_dim=None,
                  capacity_factor=1.25, z_loss_gamma=0.001, bias_decay=0.1,
-                 bias=False, noise_std=0.01):
+                 bias=False, noise_std=0.01, head_dim_qk=None):
         super().__init__()
         self.n_experts = n_experts
         self.top_k = top_k
@@ -69,6 +69,10 @@ class MoELayer(nn.Module):
 
         if expert_dim is None:
             expert_dim = 2 * d_model
+
+        # Proyección de estado recurrente (c, n) del mLSTM para dar contexto al MoE
+        state_in = (head_dim_qk or d_model // 2) * 2
+        self.state_proj = nn.Linear(state_in, d_model, bias=False)
 
         # Router
         self.router = nn.Linear(d_model, n_experts, bias=False)
@@ -138,11 +142,12 @@ class MoELayer(nn.Module):
         z_loss = self.z_loss_gamma * (logsumexp ** 2).mean()
         return z_loss
 
-    def forward(self, x):
+    def forward(self, x, state=None):
         """Forward MoE.
 
         Args:
             x: (B, T, d_model)
+            state: (c, n, m) from mLSTM, optional context
         Returns:
             output: (B, T, d_model)
             aux_loss: Router z-loss (scalar, 0 if disabled)
@@ -153,6 +158,15 @@ class MoELayer(nn.Module):
         B, T, C = x.shape
         N = B * T
         xf = x.reshape(N, C)
+
+        # State context: inject mLSTM recurrent state into tokens
+        if state is not None:
+            c, n = state[0], state[1]  # (B, NH, qk, hv), (B, NH, qk, 1)
+            c_pool = c.mean(dim=(1, 3))  # (B, qk)
+            n_pool = n.mean(dim=(1, 3))  # (B, qk)
+            ctx = torch.cat([c_pool, n_pool], dim=-1)  # (B, 2*qk) = (B, d_model)
+            ctx = self.state_proj(ctx).unsqueeze(1)  # (B, 1, d_model)
+            xf = xf + ctx.repeat(1, T, 1).reshape(N, C)
 
         # 1) Router scores
         scores = self.router(xf)  # (N, n_experts)

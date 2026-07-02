@@ -43,6 +43,8 @@ class xLSTMMoEBlock(nn.Module):
             use_weight=True, use_bias=False,
             force_float32_reductions=config.norm_reduction_force_float32,
         )
+        qk_dim = int(config.embedding_dim * config.qk_dim_factor)
+        head_dim_qk = qk_dim // config.num_heads
         self.moe = MoELayer(
             d_model=config.embedding_dim,
             expert_dim=moe_cfg.get("expert_dim"),
@@ -53,6 +55,7 @@ class xLSTMMoEBlock(nn.Module):
             z_loss_gamma=moe_cfg.get("z_loss_gamma", 0.001),
             bias_decay=moe_cfg.get("bias_decay", 0.1),
             noise_std=moe_cfg.get("noise_std", 0.0),
+            head_dim_qk=head_dim_qk,
         )
 
     def forward(self, x, state=None):
@@ -60,13 +63,13 @@ class xLSTMMoEBlock(nn.Module):
         x_mlstm, state = self.mlstm_layer(x_mlstm, state)
         x = x + x_mlstm
         x_moe = self.norm_moe(x)
-        x_moe, aux_loss = self.moe(x_moe)
+        x_moe, aux_loss = self.moe(x_moe, state)
         x = x + x_moe
         return x, aux_loss, state
 
     def step(self, x, state=None):
         x_mlstm, state = self.mlstm_layer(self.norm_mlstm(x), state)
         x = x + x_mlstm
-        x_moe, _ = self.moe(self.norm_moe(x))
+        x_moe, _ = self.moe(self.norm_moe(x), state)
         x = x + x_moe
         return x, state

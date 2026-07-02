@@ -26,9 +26,22 @@ class mLSTMBackend(nn.Module):
         if f.ndim == 3: f = f.unsqueeze(-1)
         B, NH, S, DH = q.shape
         if S > 1 and c_initial is None:
-            return self.native.parallel_stabilized_simple(
+            h = self.native.parallel_stabilized_simple(
                 queries=q, keys=k, values=v, igate_preact=i, fgate_preact=f, eps=self.config.eps
-            ), None
+            )
+            # Also compute final state for MoE context
+            dh_qk = q.shape[3]
+            dh_v = v.shape[3]
+            c = torch.zeros((B, NH, dh_qk, dh_v), device=q.device, dtype=q.dtype)
+            n = torch.zeros((B, NH, dh_qk, 1), device=q.device, dtype=q.dtype)
+            m = torch.zeros((B, NH, 1, 1), device=q.device, dtype=q.dtype)
+            for t in range(S):
+                _, (c, n, m) = self.native.recurrent_step_stabilized_simple(
+                    c_state=c, n_state=n, m_state=m,
+                    q=q[:, :, t:t+1], k=k[:, :, t:t+1], v=v[:, :, t:t+1],
+                    igate_preact=i[:, :, t:t+1], fgate_preact=f[:, :, t:t+1], eps=self.config.eps
+                )
+            return h, (c, n, m)
         else:
             if c_initial is None:
                 dh_qk, dh_v = q.shape[3], v.shape[3]

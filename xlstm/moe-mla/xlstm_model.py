@@ -60,13 +60,13 @@ class xLSTMMoEModel(nn.Module):
     def forward(self, idx):
         x = self.embedding(idx)
         aux_loss = 0.0
-        state = {i: None for i in range(len(self.blocks))}
+        mlstm_state = {i: None for i in range(len(self.blocks))}
         for i, block in enumerate(self.blocks):
             if isinstance(block, xLSTMMoEBlock):
-                x, loss, _ = block(x, state[i])
+                x, loss, mlstm_state[i] = block(x, mlstm_state[i])
                 aux_loss = aux_loss + loss
             else:
-                x, _ = block(x, state[i])
+                x, mlstm_state[i] = block(x, mlstm_state[i])
         x = self.out_norm(x)
         logits = self.lm_head(x)
         logits = soft_cap(logits, 30.0)
