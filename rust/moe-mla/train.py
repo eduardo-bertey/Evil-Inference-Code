@@ -1,4 +1,4 @@
-import sys, os, time, math, torch
+import sys, os, time, math, inspect, torch
 import torch.nn.functional as F
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
@@ -172,7 +172,17 @@ def main():
         n_dense_start=n_dense_start, n_dense_end=n_dense_end,
     ).to(device).to(dtype=dtype)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    # Weight decay groups: biases + norms no decay, weights sí
+    decay_params = [p for n, p in model.named_parameters() if p.dim() >= 2 and p.requires_grad]
+    nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2 and p.requires_grad]
+    optim_groups = [
+        {"params": decay_params, "weight_decay": 0.01},
+        {"params": nodecay_params, "weight_decay": 0.0},
+    ]
+    fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+    use_fused = fused_available and device.type == "cuda"
+    opt = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), fused=use_fused)
+    print(f"AdamW fused={use_fused} | decay={len(decay_params)} param tensors, nodecay={len(nodecay_params)}")
 
     # ── Checkpoint ─────────────────────────────────────────────────────────
     step = 0

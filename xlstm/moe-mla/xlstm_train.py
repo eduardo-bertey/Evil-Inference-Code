@@ -1,5 +1,5 @@
 """xLSTM MoE Training — mLSTM + MoE (uses transformer tokenizer, same revision)."""
-import sys, os, time, math, torch
+import sys, os, time, math, inspect, torch
 import torch.nn.functional as F
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
@@ -108,7 +108,16 @@ def main():
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Params: {total_params:,}")
 
-    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.01)
+    decay_params = [p for n, p in model.named_parameters() if p.dim() >= 2 and p.requires_grad]
+    nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2 and p.requires_grad]
+    optim_groups = [
+        {"params": decay_params, "weight_decay": 0.01},
+        {"params": nodecay_params, "weight_decay": 0.0},
+    ]
+    fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+    use_fused = fused_available and device.type == "cuda"
+    opt = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), fused=use_fused)
+    print(f"AdamW fused={use_fused} | decay={len(decay_params)} tensors, nodecay={len(nodecay_params)}")
 
     # Checkpoint
     step = 0
