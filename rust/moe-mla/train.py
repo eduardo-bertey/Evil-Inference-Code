@@ -226,8 +226,8 @@ def main():
     else:
         bi = input(f"Block [{ckpt_block}]: ").strip()
         block_idx = int(bi) if bi else ckpt_block
-        mix_answer = input("Mix Spanish FineWeb2-HQ with Wikipedia ES? (y/N): ").strip().lower()
-        mezcla = mix_answer in ("y", "yes", "s", "si")
+        mix_answer = input("Mix Spanish FineWeb2-HQ with Wikipedia ES? (Y/n): ").strip().lower()
+        mezcla = False if mix_answer in ("n", "no") else True
         sd = StreamingDataset(block_mb=3.0, block_idx=block_idx, mezcla=mezcla)
         if mezcla:
             print("Mix enabled: appending 1MB of FineWeb Spanish after 3MB Wikipedia ES")

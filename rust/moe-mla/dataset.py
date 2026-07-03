@@ -91,7 +91,7 @@ def download_wikipedia_50mb(output_path: str = TOKENIZER_DATA_PATH) -> str:
 def download_training_block(
     output_path: str = TRAIN_DATA_PATH,
     block_mb: float = 3.0,
-    mezcla: bool = False,
+    mezcla: bool = True,
     mix_mb: float = 1.0,
     mix_dataset: Optional[tuple[str, str] | str] = None,
 ) -> str:
@@ -140,7 +140,7 @@ class StreamingDataset:
         self,
         block_mb: float = 3.0,
         block_idx: int = 0,
-        mezcla: bool = False,
+        mezcla: bool = True,
         mix_mb: float = 1.0,
         mix_dataset: Optional[tuple[str, str] | str] = None,
     ):
