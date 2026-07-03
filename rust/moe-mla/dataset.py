@@ -105,7 +105,8 @@ def download_training_block(
     """
     mix_dataset = mix_dataset if mix_dataset is not None else FINEWEB_CONFIG
 
-    if os.path.exists(output_path) and os.path.getsize(output_path) >= int(block_mb * 1024 * 1024):
+    required_bytes = int((block_mb + mix_mb) * 1024 * 1024) if mezcla and mix_mb > 0 else int(block_mb * 1024 * 1024)
+    if os.path.exists(output_path) and os.path.getsize(output_path) >= required_bytes:
         print(f"Training data already at {output_path} ({os.path.getsize(output_path)} bytes)")
         return output_path
 

@@ -91,6 +91,10 @@ z_loss_gamma = 0.001
 bias_decay = 0.1
 # Per-layer expert counts: list or int (same for all MoE layers)
 # n_experts = [4, 4, 4, 6, 6, 6, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 6, 6, 6, 4, 4, 4, 4]
+
+# ─── Data Mix ─────────────────────────────────────────────────────────────────
+mezcla = True   # Mix Spanish FineWeb2-HQ with Wikipedia ES
+
 plot_interval = 256
 
 
@@ -226,13 +230,8 @@ def main():
     else:
         bi = input(f"Block [{ckpt_block}]: ").strip()
         block_idx = int(bi) if bi else ckpt_block
-        mix_answer = input("Mix Spanish FineWeb2-HQ with Wikipedia ES? (Y/n): ").strip().lower()
-        mezcla = False if mix_answer in ("n", "no") else True
         sd = StreamingDataset(block_mb=3.0, block_idx=block_idx, mezcla=mezcla)
-        if mezcla:
-            print("Mix enabled: appending 1MB of FineWeb Spanish after 3MB Wikipedia ES")
-        else:
-            print("Mix disabled: using pure 3MB Wikipedia ES")
+        print(f"Mix {'enabled' if mezcla else 'disabled'} (FineWeb2-HQ)")
         sd.load_tokens(tokenizer)
         n = len(sd.get_tokens())
         tokens_per_epoch = (n - seq_len - 1) // seq_len
