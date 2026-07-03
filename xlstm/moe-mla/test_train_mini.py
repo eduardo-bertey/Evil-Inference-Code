@@ -14,7 +14,7 @@ num_heads = 4
 seq_len = 64
 batch_size = 4
 lr = 3e-4
-steps = 200000
+steps = 5000
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"Device: {device}")

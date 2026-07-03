@@ -226,14 +226,20 @@ def main():
     else:
         bi = input(f"Block [{ckpt_block}]: ").strip()
         block_idx = int(bi) if bi else ckpt_block
-        sd = StreamingDataset(block_mb=3.0, block_idx=block_idx)
+        mix_answer = input("Mix Spanish FineWeb2-HQ with Wikipedia ES? (y/N): ").strip().lower()
+        mezcla = mix_answer in ("y", "yes", "s", "si")
+        sd = StreamingDataset(block_mb=3.0, block_idx=block_idx, mezcla=mezcla)
+        if mezcla:
+            print("Mix enabled: appending 1MB of FineWeb Spanish after 3MB Wikipedia ES")
+        else:
+            print("Mix disabled: using pure 3MB Wikipedia ES")
         sd.load_tokens(tokenizer)
         n = len(sd.get_tokens())
         tokens_per_epoch = (n - seq_len - 1) // seq_len
         total_steps = (tokens_per_epoch // batch_size) * num_epochs
         epochs_do = num_epochs
 
-    # ── Stats ──────────────────────────────────────────────────────────────
+    # ── Stats ──────────────────────────────────────────────
     emb_p = model.embedding.weight.numel()
     layer_p = sum(p.numel() for l in model.transformer.layers for p in l.parameters())
     norm_p = model.transformer.final_norm.weight.numel()
