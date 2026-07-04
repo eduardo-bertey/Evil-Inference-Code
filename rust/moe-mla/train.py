@@ -25,7 +25,7 @@ def generate_sample(model, tokenizer, device, prompt="hola", max_new=30):
     model.eval()
     x = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
     out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40, top_p=0.9,
-                         repetition_penalty=1.2, use_partial_rope=True, rotary_pct=0.25)
+                         repetition_penalty=1.2, use_partial_rope=use_partial_rope, rotary_pct=rotary_pct)
     model.train()
     return tokenizer.decode(out[0].tolist())
 
@@ -66,6 +66,7 @@ rotary_pct = 0.25
 use_mla = True
 use_xsa = True
 qk_norm = True
+use_partial_rope = False
 use_sandwich_norm = True
 noise_std = 0.01
 mla_d_c = 32
