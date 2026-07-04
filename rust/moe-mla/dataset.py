@@ -101,7 +101,6 @@ class StreamingDataset:
                 written += tam
         if written < max_bytes:
             print(f"  Wikipedia stream exhausted at block {self.block_idx}, wrapping on next block")
-            self._wiki_iter = None
 
         if getattr(self, "mezcla", False) and self.mix_mb > 0:
             mix_bytes = int(self.mix_mb * 1024 * 1024)
