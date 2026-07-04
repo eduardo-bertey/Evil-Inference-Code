@@ -55,6 +55,7 @@ class StreamingDataset:
         self.mix_dataset = mix_dataset if mix_dataset is not None else FINEWEB_CONFIG
         # Persistent streaming iterators (created once, live forever)
         self._wiki_iter = None
+        self._wiki_block_idx = 0
         self._fineweb_iter = None
         # Prefetch
         self._prefetch_thread: threading.Thread | None = None
@@ -73,32 +74,48 @@ class StreamingDataset:
                 ds = load_dataset(self.mix_dataset, split="train", streaming=True)
             self._fineweb_iter = iter(ds)
 
-    def _read_from_fineweb_iter(self, max_bytes):
-        if self._fineweb_iter is None:
-            return [], 0
-        texts = []
-        appended = 0
-        for item in self._fineweb_iter:
-            text = item.get("text") if isinstance(item, dict) else str(item)
-            tam = len(text.encode("utf-8"))
-            if appended + tam > max_bytes:
-                break
-            texts.append(text)
-            appended += tam
-        return texts, appended
+    def _new_wiki_iter(self):
+        ds = load_dataset(*WIKI_CONFIG, split="train", streaming=True)
+        return iter(ds)
 
-    def download_block(self, mix_path=None):
+    def _download_block_from_iterator(self, iterator, skip_blocks: int, path: str) -> int:
         max_bytes = int(self.block_mb * 1024 * 1024)
-        self._ensure_wiki_iter()
+        for _ in range(skip_blocks):
+            written = 0
+            for item in iterator:
+                text = f"--- {item['title']} ---\n{item['text']}\n\n"
+                tam = len(text.encode("utf-8"))
+                if written + tam > max_bytes:
+                    break
+                written += tam
+            if written == 0:
+                print(f"  Wikipedia stream exhausted while skipping blocks")
+                break
+
         written = 0
-        with open(self._path, "w", encoding="utf-8") as f:
-            for item in self._wiki_iter:
+        with open(path, "w", encoding="utf-8") as f:
+            for item in iterator:
                 text = f"--- {item['title']} ---\n{item['text']}\n\n"
                 tam = len(text.encode("utf-8"))
                 if written + tam > max_bytes:
                     break
                 f.write(text)
                 written += tam
+        return written
+
+    def download_block(self, mix_path=None, iterator=None):
+        max_bytes = int(self.block_mb * 1024 * 1024)
+        if iterator is None:
+            self._ensure_wiki_iter()
+            if self._wiki_iter is None or self._wiki_block_idx > self.block_idx:
+                self._wiki_iter = self._new_wiki_iter()
+                self._wiki_block_idx = 0
+            skip_blocks = max(0, self.block_idx - self._wiki_block_idx)
+            written = self._download_block_from_iterator(self._wiki_iter, skip_blocks, self._path)
+            self._wiki_block_idx = self.block_idx + 1
+        else:
+            written = self._download_block_from_iterator(iterator, self.block_idx, self._path)
+
         if written < max_bytes:
             print(f"  Wikipedia stream exhausted at block {self.block_idx}, wrapping on next block")
 
@@ -118,19 +135,20 @@ class StreamingDataset:
                 print(f"  FineWeb mixing skipped: {e}")
 
     def _prefetch_worker(self, block_idx: int):
+        old_block = self.block_idx
+        old_path = self._path
         try:
             self._prefetch_error = None
             path = os.path.join(_DIR, f"wiki_block_{block_idx}.txt")
             if not os.path.exists(path):
-                old_block = self.block_idx
-                old_path = self._path
                 self.block_idx = block_idx
                 self._path = path
-                self.download_block()
-                self.block_idx = old_block
-                self._path = old_path
+                self.download_block(iterator=self._new_wiki_iter())
         except Exception as e:
             self._prefetch_error = e
+        finally:
+            self.block_idx = old_block
+            self._path = old_path
 
     def _wait_prefetch(self):
         if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
