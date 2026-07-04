@@ -208,7 +208,6 @@ class StreamingDataset:
             self.block_idx = 0
             self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
             self._wiki_iter = None
-            self._fineweb_iter = None
             if not os.path.exists(self._path):
                 self.download_block()
             self._load_tokens_from_file()
