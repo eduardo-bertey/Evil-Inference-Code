@@ -91,6 +91,7 @@ class StreamingDataset:
             if self._fineweb_iter is not None:
                 print(f"  FineWeb2-HQ stream exhausted, wrapping to block {self.block_idx}")
             self._fineweb_iter = None
+            self._fineweb_block_idx = 0
             self._ensure_fineweb_iter()
             if self._fineweb_iter is None:
                 return [], 0
@@ -154,20 +155,39 @@ class StreamingDataset:
             self._wiki_iter = None
             self._wiki_block_idx = 0
 
-        if getattr(self, "mezcla", False) and self.mix_mb > 0:
-            mix_bytes = int(self.mix_mb * 1024 * 1024)
-            try:
-                self._ensure_fineweb_iter()
-                texts, appended = self._read_from_fineweb_iter(mix_bytes)
-                if texts:
-                    out_path = mix_path or self._path
-                    with open(out_path, "a", encoding="utf-8") as f:
-                        for t in texts:
-                            f.write(t)
-                            f.write("\n\n")
-                    print(f"  Appended {appended} bytes from FineWeb2-HQ for block {self.block_idx}")
-            except Exception as e:
-                print(f"  FineWeb mixing skipped: {e}")
+        if getattr(self, "mezcla", False) and self.mix_mb > 0 and iterator is None:
+            self._append_fineweb_maybe(mix_path)
+
+    def _append_fineweb_maybe(self, mix_path=None):
+        if not getattr(self, "mezcla", False) or self.mix_mb <= 0:
+            return
+        mix_bytes = int(self.mix_mb * 1024 * 1024)
+        try:
+            self._ensure_fineweb_iter()
+            skip_fw = max(0, self.block_idx - self._fineweb_block_idx)
+            for _ in range(skip_fw):
+                written_fw = 0
+                for item in self._fineweb_iter:
+                    text = item.get("text") if isinstance(item, dict) else str(item)
+                    tam = len(text.encode("utf-8"))
+                    if written_fw + tam > mix_bytes:
+                        break
+                    written_fw += tam
+                if written_fw == 0:
+                    self._fineweb_iter = None
+                    self._fineweb_block_idx = 0
+                    break
+            texts, appended = self._read_from_fineweb_iter(mix_bytes)
+            if texts:
+                out_path = mix_path or self._path
+                with open(out_path, "a", encoding="utf-8") as f:
+                    for t in texts:
+                        f.write(t)
+                        f.write("\n\n")
+                self._fineweb_block_idx = self.block_idx + 1
+                print(f"  Appended {appended} bytes from FineWeb2-HQ for block {self.block_idx}")
+        except Exception as e:
+            print(f"  FineWeb mixing skipped: {e}")
 
     def _prefetch_worker(self, block_idx: int):
         old_block = self.block_idx
@@ -222,6 +242,8 @@ class StreamingDataset:
         self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
         if not os.path.exists(self._path):
             self.download_block()
+        else:
+            self._append_fineweb_maybe()
         self._load_tokens_from_file()
         if len(self._tokens) < 1000:
             os.remove(self._path)
