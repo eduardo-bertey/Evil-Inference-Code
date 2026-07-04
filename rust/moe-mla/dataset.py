@@ -57,7 +57,6 @@ class StreamingDataset:
         self._wiki_iter = None
         self._wiki_block_idx = 0
         self._fineweb_iter = None
-        self._fineweb_block_idx = 0
         # Prefetch
         self._prefetch_thread: threading.Thread | None = None
         self._prefetch_error: Exception | None = None
@@ -168,7 +167,7 @@ class StreamingDataset:
                         for t in texts:
                             f.write(t)
                             f.write("\n\n")
-                    print(f"  Appended {appended} bytes from FineWeb2-HQ for block {self._fineweb_block_idx}")
+                    print(f"  Appended {appended} bytes from FineWeb2-HQ for block {self.block_idx}")
             except Exception as e:
                 print(f"  FineWeb mixing skipped: {e}")
 
