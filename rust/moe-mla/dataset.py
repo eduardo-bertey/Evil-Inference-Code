@@ -74,6 +74,20 @@ class StreamingDataset:
                 ds = load_dataset(self.mix_dataset, split="train", streaming=True)
             self._fineweb_iter = iter(ds)
 
+    def _read_from_fineweb_iter(self, max_bytes: int):
+        if self._fineweb_iter is None:
+            return [], 0
+        texts = []
+        appended = 0
+        for item in self._fineweb_iter:
+            text = item.get("text") if isinstance(item, dict) else str(item)
+            tam = len(text.encode("utf-8"))
+            if appended + tam > max_bytes:
+                break
+            texts.append(text)
+            appended += tam
+        return texts, appended
+
     def _new_wiki_iter(self):
         ds = load_dataset(*WIKI_CONFIG, split="train", streaming=True)
         return iter(ds)
