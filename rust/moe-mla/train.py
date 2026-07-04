@@ -310,7 +310,10 @@ def main():
                     pg["lr"] = lr_curr * pg.get("lr_scale", 1.0)
                 opt.zero_grad()
 
-            logits, aux_loss = model(x)
+            if use_partial_rope:
+                logits, aux_loss = model.forward_train_partial_rope(x, rotary_pct=rotary_pct)
+            else:
+                logits, aux_loss = model(x)
             loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
             loss = loss + aux_loss  # add MoE z-loss
             (loss / grad_accum).backward()

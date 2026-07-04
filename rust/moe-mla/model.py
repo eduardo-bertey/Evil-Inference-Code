@@ -189,16 +189,13 @@ class TransformerLM(nn.Module):
         self,
         input_ids: torch.Tensor,
         rotary_pct: float = 0.5,
-    ) -> torch.Tensor:
-        """Forward with partial RoPE + x0 injection.
-
-        Compatible with Rust forward_train_partial_rope.
-        Manually replicates the layer loop for partial RoPE and x0.
-        """
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward with partial RoPE + x0 injection."""
         x = self.embedding(input_ids)
         batch, seq_len, _ = x.shape
         x0 = x.clone()
         h = x
+        aux_loss = torch.tensor(0.0, device=h.device)
 
         for i, layer in enumerate(self.transformer.layers):
             residual = h
@@ -244,12 +241,16 @@ class TransformerLM(nn.Module):
                 h_attn = layer.attention.o_proj(attn_output)
                 h = residual + h_attn
 
-            # FFN
+            # FFN / MoE
             residual = h
             h_norm = layer.ffn_norm(h)
-            ffn_out = layer.ffn(h_norm)
-            h_ffn = ffn_out[0] if isinstance(ffn_out, tuple) else ffn_out
-            h = residual + h_ffn
+            if layer.use_moe:
+                ffn_out, moe_aux = layer.ffn(h_norm)
+                aux_loss = aux_loss + moe_aux
+            else:
+                ffn_out = layer.ffn(h_norm)
+                ffn_out = ffn_out[0] if isinstance(ffn_out, tuple) else ffn_out
+            h = residual + ffn_out
 
             # x0 injection
             if self.x0_lambdas is not None:
@@ -257,7 +258,7 @@ class TransformerLM(nn.Module):
                 h = h + lam * x0
 
         h = self.transformer.final_norm(h)
-        return self.head(h)
+        return self.head(h), aux_loss
 
     def forward_with_cache(
         self,
