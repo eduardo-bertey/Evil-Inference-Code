@@ -1,6 +1,6 @@
 """Dataset handling: download Wikipedia ES and Spanish FineWeb2-HQ training data."""
 
-import os
+import os, threading
 from typing import Optional
 from datasets import load_dataset
 
@@ -11,68 +11,10 @@ TOKENIZER_DATA_PATH = os.path.join(_DIR, "wiki_tokenizer_50mb.txt")
 TRAIN_DATA_PATH = os.path.join(_DIR, "wiki_train_data.txt")
 
 
-def _append_mix_content(output_path: str, mix_mb: float, block_idx: int = 0, mix_dataset: Optional[str] = None):
-    """Append up to `mix_mb` megabytes of text to `output_path`.
-
-    Behavior:
-    - If `mix_dataset` is provided, try to stream from that dataset id.
-    - Otherwise, look for a local file `fineweb_block_{block_idx}.txt` in the same dir.
-    """
-    mix_bytes = int(mix_mb * 1024 * 1024)
-    appended = 0
-
-    # Try remote dataset first if provided
-    if mix_dataset:
-        print(f"Attempting to append {mix_mb}MB from dataset {mix_dataset}...")
-        if isinstance(mix_dataset, (tuple, list)):
-            ds2 = load_dataset(*mix_dataset, split="train", streaming=True)
-        else:
-            ds2 = load_dataset(mix_dataset, split="train", streaming=True)
-        it2 = iter(ds2)
-        # Skip to block-aligned offset
-        skip_bytes = block_idx * mix_bytes
-        if skip_bytes > 0:
-            skipped = 0
-            for item in it2:
-                text = item.get("text") if isinstance(item, dict) else str(item)
-                skipped += len(text.encode("utf-8"))
-                if skipped >= skip_bytes:
-                    break
-        with open(output_path, "a", encoding="utf-8") as f:
-            for item in it2:
-                text = item.get("text") if isinstance(item, dict) else str(item)
-                tam = len(text.encode("utf-8"))
-                if appended + tam > mix_bytes:
-                    break
-                f.write(text)
-                f.write("\n\n")
-                appended += tam
-        print(f"Appended {appended} bytes from dataset {mix_dataset} to {output_path}")
-        return appended
-
-    # Fallback: check for a local fineweb block file
-    local_path = os.path.join(_DIR, f"fineweb_block_{block_idx}.txt")
-    if os.path.exists(local_path):
-        print(f"Appending local fineweb block {local_path} up to {mix_mb}MB")
-        with open(local_path, "r", encoding="utf-8") as src, open(output_path, "a", encoding="utf-8") as dst:
-            while appended < mix_bytes:
-                chunk = src.read(min(65536, mix_bytes - appended))
-                if not chunk:
-                    break
-                dst.write(chunk)
-                appended += len(chunk.encode("utf-8"))
-        print(f"Appended {appended} bytes from {local_path} to {output_path}")
-        return appended
-
-    raise FileNotFoundError("No mix source found (mix_dataset not provided and local fineweb_block file missing)")
-
-
 def download_wikipedia_50mb(output_path: str = TOKENIZER_DATA_PATH) -> str:
-    """Download first 50MB of Wikipedia ES for tokenizer training."""
     if os.path.exists(output_path) and os.path.getsize(output_path) >= 50_000_000:
         print(f"Tokenizer data already at {output_path} ({os.path.getsize(output_path)} bytes)")
         return output_path
-
     print("Downloading 50MB Wikipedia ES for tokenizer...")
     ds = load_dataset(*WIKI_CONFIG, split="train", streaming=True)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -88,55 +30,13 @@ def download_wikipedia_50mb(output_path: str = TOKENIZER_DATA_PATH) -> str:
     return output_path
 
 
-def download_training_block(
-    output_path: str = TRAIN_DATA_PATH,
-    block_mb: float = 3.0,
-    mezcla: bool = True,
-    mix_mb: float = 1.0,
-    mix_dataset: Optional[tuple[str, str] | str] = None,
-) -> str:
-    """Download one block of Wikipedia ES for training.
-
-    Optional mixing: if `mezcla` is True and `mix_mb` > 0, the function will
-    attempt to append up to `mix_mb` megabytes of additional text from a
-    secondary source. The secondary source can be provided via
-    `mix_dataset` (a `datasets` id) or as a local file named
-    `fineweb_block_{block_idx}.txt` next to this file.
-    """
-    mix_dataset = mix_dataset if mix_dataset is not None else FINEWEB_CONFIG
-
-    required_bytes = int((block_mb + mix_mb) * 1024 * 1024) if mezcla and mix_mb > 0 else int(block_mb * 1024 * 1024)
-    if os.path.exists(output_path) and os.path.getsize(output_path) >= required_bytes:
-        print(f"Training data already at {output_path} ({os.path.getsize(output_path)} bytes)")
-        return output_path
-
-    max_bytes = int(block_mb * 1024 * 1024)
-    print(f"Downloading {block_mb}MB Wikipedia ES block...")
-    ds = load_dataset(*WIKI_CONFIG, split="train", streaming=True)
-    with open(output_path, "w", encoding="utf-8") as f:
-        written = 0
-        for item in ds:
-            text = f"--- {item['title']} ---\n{item['text']}\n\n"
-            tam = len(text.encode("utf-8"))
-            if written + tam > max_bytes:
-                break
-            f.write(text)
-            written += tam
-
-    print(f"Written {written} bytes to {output_path}")
-
-    # Append Spanish FineWeb only when explicitly requested.
-    if mezcla and mix_mb > 0:
-        try:
-            _append_mix_content(output_path, mix_mb, block_idx=0, mix_dataset=mix_dataset)
-        except Exception as e:
-            print(f"Mixing skipped: {e}")
-
-    return output_path
-
-
 class StreamingDataset:
-    """Stream training data in 3MB Wikipedia ES blocks, with optional Spanish FineWeb mix."""
+    """Stream training data in blocks via persistent iterators.
+    
+    Both Wikipedia and FineWeb2-HQ use persistent load_dataset(streaming=True)
+    iterators — they are created once and kept across blocks. No skip, no recreate.
+    Prefetch thread downloads the next block while training runs on current block.
+    """
     def __init__(
         self,
         block_mb: float = 3.0,
@@ -150,73 +50,138 @@ class StreamingDataset:
         self._path = os.path.join(_DIR, f"wiki_block_{block_idx}.txt")
         self._tokens = None
         self._tokenizer = None
-        # Mixing options
         self.mezcla = mezcla
         self.mix_mb = mix_mb
         self.mix_dataset = mix_dataset if mix_dataset is not None else FINEWEB_CONFIG
+        # Persistent streaming iterators (created once, live forever)
+        self._wiki_iter = None
+        self._fineweb_iter = None
+        # Prefetch
+        self._prefetch_thread: threading.Thread | None = None
+        self._prefetch_error: Exception | None = None
 
-    def load_tokens(self, tokenizer):
-        self._tokenizer = tokenizer
-        self.download_block()
-        with open(self._path, "r", encoding="utf-8") as f:
-            text = f.read()
-        self._tokens = tokenizer.encode(text)
-        print(f"Loaded {len(self._tokens)} tokens from block {self.block_idx}")
+    def _ensure_wiki_iter(self):
+        if self._wiki_iter is None:
+            ds = load_dataset(*WIKI_CONFIG, split="train", streaming=True)
+            self._wiki_iter = iter(ds)
 
-    def download_block(self):
+    def _ensure_fineweb_iter(self):
+        if self._fineweb_iter is None and self.mix_dataset is not None:
+            if isinstance(self.mix_dataset, (tuple, list)):
+                ds = load_dataset(*self.mix_dataset, split="train", streaming=True)
+            else:
+                ds = load_dataset(self.mix_dataset, split="train", streaming=True)
+            self._fineweb_iter = iter(ds)
+
+    def _read_from_fineweb_iter(self, max_bytes):
+        if self._fineweb_iter is None:
+            return [], 0
+        texts = []
+        appended = 0
+        for item in self._fineweb_iter:
+            text = item.get("text") if isinstance(item, dict) else str(item)
+            tam = len(text.encode("utf-8"))
+            if appended + tam > max_bytes:
+                break
+            texts.append(text)
+            appended += tam
+        return texts, appended
+
+    def download_block(self, mix_path=None):
         max_bytes = int(self.block_mb * 1024 * 1024)
-        ds = load_dataset(*WIKI_CONFIG, split="train", streaming=True)
-        it = iter(ds)
-        # Skip bytes: consume full articles from the SAME iterator
-        skip_bytes = self.block_idx * max_bytes
-        if skip_bytes > 0:
-            skipped = 0
-            for item in it:
-                text = f"--- {item['title']} ---\n{item['text']}\n\n"
-                skipped += len(text.encode("utf-8"))
-                if skipped >= skip_bytes:
-                    break
+        self._ensure_wiki_iter()
+        written = 0
         with open(self._path, "w", encoding="utf-8") as f:
-            written = 0
-            for item in it:
+            for item in self._wiki_iter:
                 text = f"--- {item['title']} ---\n{item['text']}\n\n"
                 tam = len(text.encode("utf-8"))
                 if written + tam > max_bytes:
                     break
                 f.write(text)
                 written += tam
+        if written < max_bytes:
+            print(f"  Wikipedia stream exhausted at block {self.block_idx}, wrapping on next block")
 
-        # If mixing is enabled, try to append content from secondary source
         if getattr(self, "mezcla", False) and self.mix_mb > 0:
+            mix_bytes = int(self.mix_mb * 1024 * 1024)
             try:
-                _append_mix_content(self._path, self.mix_mb, self.block_idx, mix_dataset=self.mix_dataset)
+                self._ensure_fineweb_iter()
+                texts, appended = self._read_from_fineweb_iter(mix_bytes)
+                if texts:
+                    out_path = mix_path or self._path
+                    with open(out_path, "a", encoding="utf-8") as f:
+                        for t in texts:
+                            f.write(t)
+                            f.write("\n\n")
+                    print(f"  Appended {appended} bytes from FineWeb2-HQ")
             except Exception as e:
-                print(f"Mixing skipped for block {self.block_idx}: {e}")
+                print(f"  FineWeb mixing skipped: {e}")
 
-    def _download_and_load(self):
-        """Download block at self.block_idx and load tokens."""
-        self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
-        self.download_block()
+    def _prefetch_worker(self, block_idx: int):
+        try:
+            self._prefetch_error = None
+            path = os.path.join(_DIR, f"wiki_block_{block_idx}.txt")
+            if not os.path.exists(path):
+                old_block = self.block_idx
+                old_path = self._path
+                self.block_idx = block_idx
+                self._path = path
+                self.download_block()
+                self.block_idx = old_block
+                self._path = old_path
+        except Exception as e:
+            self._prefetch_error = e
+
+    def _wait_prefetch(self):
+        if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
+            self._prefetch_thread.join()
+            self._prefetch_thread = None
+        if self._prefetch_error is not None:
+            err = self._prefetch_error
+            self._prefetch_error = None
+            print(f"  Prefetch failed for block {self.block_idx + 1}: {err}")
+
+    def _start_prefetch(self, block_idx: int):
+        self._wait_prefetch()
+        self._prefetch_thread = threading.Thread(target=self._prefetch_worker, args=(block_idx,), daemon=True)
+        self._prefetch_thread.start()
+
+    def _load_tokens_from_file(self):
         with open(self._path, "r", encoding="utf-8") as f:
             text = f.read()
         self._tokens = self._tokenizer.encode(text)
 
+    def load_tokens(self, tokenizer):
+        self._tokenizer = tokenizer
+        if not os.path.exists(self._path):
+            self.download_block()
+        self._load_tokens_from_file()
+        print(f"Loaded {len(self._tokens)} tokens from block {self.block_idx}")
+        self._start_prefetch(self.block_idx + 1)
+
     def next_block(self):
-        # Delete old block file to free disk
         old_path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
         if os.path.exists(old_path):
             os.remove(old_path)
-        # Drop old tokens before loading new ones
         self._tokens = None
+        self._wait_prefetch()
         self.block_idx += 1
-        self._download_and_load()
-        # If block is too small, dataset is exhausted — wrap to 0
+        self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
+        if not os.path.exists(self._path):
+            self.download_block()
+        self._load_tokens_from_file()
         if len(self._tokens) < 1000:
             os.remove(self._path)
             print(f"  Dataset exhausted at block {self.block_idx}, wrapping to block 0")
             self.block_idx = 0
-            self._download_and_load()
+            self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
+            self._wiki_iter = None
+            self._fineweb_iter = None
+            if not os.path.exists(self._path):
+                self.download_block()
+            self._load_tokens_from_file()
         print(f"  Loaded block {self.block_idx}: {len(self._tokens)} tokens")
+        self._start_prefetch(self.block_idx + 1)
 
     def get_tokens(self):
         if self._tokens is None:
