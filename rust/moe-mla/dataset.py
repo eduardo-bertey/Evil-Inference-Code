@@ -104,30 +104,40 @@ class StreamingDataset:
         ds = load_dataset(*WIKI_CONFIG, split="train", streaming=True)
         return iter(ds)
 
-    def _download_block_from_iterator(self, iterator, skip_blocks: int, path: str) -> int:
+    def _download_block_from_iterator(self, iterator, skip_blocks: int, path: str) -> tuple[int, bool]:
         max_bytes = int(self.block_mb * 1024 * 1024)
         for _ in range(skip_blocks):
             written = 0
+            saw_item = False
             for item in iterator:
+                saw_item = True
                 text = f"--- {item['title']} ---\n{item['text']}\n\n"
                 tam = len(text.encode("utf-8"))
+                if tam > max_bytes:
+                    print(f"  Skipping huge Wikipedia article of {tam} bytes while skipping blocks")
+                    continue
                 if written + tam > max_bytes:
                     break
                 written += tam
-            if written == 0:
+            if not saw_item:
                 print(f"  Wikipedia stream exhausted while skipping blocks")
-                break
+                return 0, True
 
         written = 0
+        exhausted = True
         with open(path, "w", encoding="utf-8") as f:
             for item in iterator:
+                exhausted = False
                 text = f"--- {item['title']} ---\n{item['text']}\n\n"
                 tam = len(text.encode("utf-8"))
+                if tam > max_bytes:
+                    print(f"  Skipping huge Wikipedia article of {tam} bytes while downloading")
+                    continue
                 if written + tam > max_bytes:
                     break
                 f.write(text)
                 written += tam
-        return written
+        return written, exhausted
 
     def download_block(self, mix_path=None, iterator=None):
         max_bytes = int(self.block_mb * 1024 * 1024)
@@ -137,13 +147,15 @@ class StreamingDataset:
                 self._wiki_iter = self._new_wiki_iter()
                 self._wiki_block_idx = 0
             skip_blocks = max(0, self.block_idx - self._wiki_block_idx)
-            written = self._download_block_from_iterator(self._wiki_iter, skip_blocks, self._path)
+            written, exhausted = self._download_block_from_iterator(self._wiki_iter, skip_blocks, self._path)
             self._wiki_block_idx = self.block_idx + 1
         else:
-            written = self._download_block_from_iterator(iterator, self.block_idx, self._path)
+            written, exhausted = self._download_block_from_iterator(iterator, self.block_idx, self._path)
 
-        if written < max_bytes:
+        if exhausted:
             print(f"  Wikipedia stream exhausted while downloading block {self.block_idx}, wrapping on next block")
+            self._wiki_iter = None
+            self._wiki_block_idx = 0
 
         if getattr(self, "mezcla", False) and self.mix_mb > 0:
             mix_bytes = int(self.mix_mb * 1024 * 1024)
