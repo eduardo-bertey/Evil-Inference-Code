@@ -57,6 +57,7 @@ class StreamingDataset:
         self._wiki_iter = None
         self._wiki_block_idx = 0
         self._fineweb_iter = None
+        self._fineweb_block_idx = 0
         # Prefetch
         self._prefetch_thread: threading.Thread | None = None
         self._prefetch_error: Exception | None = None
