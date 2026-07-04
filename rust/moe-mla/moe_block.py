@@ -17,6 +17,8 @@ from attention import Attention
 from mla_attention import MultiHeadLatentAttentionGQA
 from block import RMSNorm, compute_intermediate_dim
 from moe import MoELayer, DenseFFN
+from rope import RoPE, apply_rope_partial
+from attention import repeat_kv, KVCache
 
 
 class LayerWithMoE(nn.Module):
@@ -148,6 +150,27 @@ class LayerWithMoE(nn.Module):
             x = self.post_ffn_norm(x)
         return x, aux_loss
 
+    def forward_with_cache(self, x, offset, cache):
+        residual = x
+        h = self.attn_norm(x)
+        h, new_cache = self.attention.forward_with_cache(h, offset, cache)
+        h = self.residual_dropout(h)
+        x = residual + h
+        if self.use_sandwich_norm:
+            x = self.post_attn_norm(x)
+
+        residual = x
+        h = self.ffn_norm(x)
+        if self.use_moe:
+            h, aux_loss = self.ffn(h)
+        else:
+            h = self.ffn(h)
+        h = self.residual_dropout(h)
+        x = residual + h
+        if self.use_sandwich_norm:
+            x = self.post_ffn_norm(x)
+        return x, new_cache
+
 
 def _resolve_per_layer(val, num_layers, default=0):
     """Convert int or list to per-layer list. None → [default]*num_layers."""
@@ -241,3 +264,10 @@ class MoETransformer(nn.Module):
             x, aux = layer(x, offset)
             aux_losses.append(aux)
         return self.final_norm(x), sum(aux_losses)
+
+    def forward_with_cache(self, x, offset, caches):
+        new_caches = []
+        for layer, cache in zip(self.layers, caches):
+            x, new_cache = layer.forward_with_cache(x, offset, cache)
+            new_caches.append(new_cache)
+        return self.final_norm(x), new_caches

@@ -224,6 +224,13 @@ def main():
             print(f"Loaded HF checkpoint: step {step} epoch {epoch} block {ckpt_block}")
             loaded = True
 
+        if loaded:
+            print("\n── Generation test ──")
+            for p in ["hola", "que es la inteligencia artificial", "en un lugar de la mancha", "hoy hace mucho calor"]:
+                sample = generate_sample(model, tokenizer, device, prompt=p, max_new=50)
+                print(f"  [{p}] → {sample}")
+            print("── End test ──\n")
+
     # ── Data ────────────────────────────────────────────────────────────────
     if test_mode:
         with open(txt_path, "r", encoding="utf-8") as f:
