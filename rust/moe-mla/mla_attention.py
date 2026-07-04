@@ -127,12 +127,14 @@ class MultiHeadLatentAttentionGQA(nn.Module):
     def _decoupled_scores(self, Q_state, Q_rot, K_state, K_rot, seq_len, kv_len=None, causal=None):
         """Decoupled content + RoPE scoring.
         
-        With QK-Norm, Q and K have RMS=1 so the dot product is naturally bounded
-        by head_dim. No sqrt scaling needed — the norm already controls variance.
-        Without QK-Norm, scale by 1/sqrt(head_dim) to keep variance ~1.
+        With QK-Norm, Q and K have RMS=1 so the dot product is bounded by the
+        true information dimension d_c (KV latent), not the projected head_dim.
+        Using 1/sqrt(d_c) keeps variance ~hd/d_c ≈ 1.3 — slightly sharper than
+        standard MHA, accounting for QK correlation via shared latent.
+        Without QK-Norm, fall back to 1/sqrt(head_dim).
         """
         nh, nkv, hd, dr = self.num_heads, self.num_kv_groups, self.head_dim, self.d_rotate
-        scale_c = 1.0 if self.qk_norm else 1.0 / math.sqrt(hd)
+        scale_c = 1.0 / math.sqrt(self.qkv.d_c) if self.qk_norm else 1.0 / math.sqrt(hd)
         scale_r = 1.0 if self.qk_norm else 1.0 / math.sqrt(dr)
 
         k_c = repeat_kv(K_state, nh, nkv).transpose(1, 2)
