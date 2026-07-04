@@ -57,6 +57,7 @@ class StreamingDataset:
         self._wiki_iter = None
         self._wiki_block_idx = 0
         self._fineweb_iter = None
+        self._fineweb_block_idx = 0
         # Prefetch
         self._prefetch_thread: threading.Thread | None = None
         self._prefetch_error: Exception | None = None
@@ -75,6 +76,7 @@ class StreamingDataset:
             self._fineweb_iter = iter(ds)
 
     def _read_from_fineweb_iter(self, max_bytes: int):
+        self._ensure_fineweb_iter()
         if self._fineweb_iter is None:
             return [], 0
         texts = []
@@ -86,6 +88,16 @@ class StreamingDataset:
                 break
             texts.append(text)
             appended += tam
+        if appended == 0:
+            if self._fineweb_iter is not None:
+                print(f"  FineWeb2-HQ stream exhausted at block {self._fineweb_block_idx}, wrapping to block 0")
+            self._fineweb_iter = None
+            self._fineweb_block_idx = 0
+            self._ensure_fineweb_iter()
+            if self._fineweb_iter is None:
+                return [], 0
+            return self._read_from_fineweb_iter(max_bytes)
+        self._fineweb_block_idx += 1
         return texts, appended
 
     def _new_wiki_iter(self):
@@ -131,7 +143,7 @@ class StreamingDataset:
             written = self._download_block_from_iterator(iterator, self.block_idx, self._path)
 
         if written < max_bytes:
-            print(f"  Wikipedia stream exhausted at block {self.block_idx}, wrapping on next block")
+            print(f"  Wikipedia stream exhausted while downloading block {self.block_idx}, wrapping on next block")
 
         if getattr(self, "mezcla", False) and self.mix_mb > 0:
             mix_bytes = int(self.mix_mb * 1024 * 1024)
@@ -144,7 +156,7 @@ class StreamingDataset:
                         for t in texts:
                             f.write(t)
                             f.write("\n\n")
-                    print(f"  Appended {appended} bytes from FineWeb2-HQ")
+                    print(f"  Appended {appended} bytes from FineWeb2-HQ for block {self._fineweb_block_idx}")
             except Exception as e:
                 print(f"  FineWeb mixing skipped: {e}")
 
