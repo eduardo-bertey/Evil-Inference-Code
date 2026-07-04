@@ -166,7 +166,7 @@ def main():
         ffn_expansion=ffn_expansion,
         residual_dropout=0.0, attn_dropout=0.0, ffn_dropout=0.0,
         use_mla=True, use_xsa=use_xsa, qk_norm=qk_norm,
-        use_sandwich_norm=use_sandwich_norm, noise_std=noise_std,
+        attn_logit_cap=30, use_sandwich_norm=use_sandwich_norm, noise_std=noise_std,
         mla_block_size=128,
         mla_d_c=mla_d_c, mla_d_c1=mla_d_c1, mla_d_rotate=mla_d_rotate,
         use_moe=use_moe, n_experts=n_experts, top_k=top_k, n_shared=n_shared,

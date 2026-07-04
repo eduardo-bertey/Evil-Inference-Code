@@ -125,18 +125,23 @@ class MultiHeadLatentAttentionGQA(nn.Module):
             nn.init.ones_(m.weight)
 
     def _decoupled_scores(self, Q_state, Q_rot, K_state, K_rot, seq_len, kv_len=None, causal=None):
-        """Decoupled content + RoPE scoring with per-part scaling."""
+        """Decoupled content + RoPE scoring.
+        
+        With QK-Norm, Q and K have RMS=1 so the dot product is naturally bounded
+        by head_dim. No sqrt scaling needed — the norm already controls variance.
+        Without QK-Norm, scale by 1/sqrt(head_dim) to keep variance ~1.
+        """
         nh, nkv, hd, dr = self.num_heads, self.num_kv_groups, self.head_dim, self.d_rotate
-        # Content: (B, nh, T, hd) @ (B, nh, T, hd)^T / sqrt(hd)
-        # repeat_kv expects (B, S, nkv, D) — call before transpose
+        scale_c = 1.0 if self.qk_norm else 1.0 / math.sqrt(hd)
+        scale_r = 1.0 if self.qk_norm else 1.0 / math.sqrt(dr)
+
         k_c = repeat_kv(K_state, nh, nkv).transpose(1, 2)
         q_c = Q_state.transpose(1, 2)
-        s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) / math.sqrt(hd)
+        s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) * scale_c
 
-        # RoPE: (B, nh, T, dr) @ (B, nh, T, dr)^T / sqrt(dr)
         q_r = Q_rot.transpose(1, 2)
         k_r = K_rot.transpose(1, 2).expand(-1, nh, -1, -1)
-        s_r = torch.matmul(q_r, k_r.transpose(-2, -1)) / math.sqrt(dr)
+        s_r = torch.matmul(q_r, k_r.transpose(-2, -1)) * scale_r
 
         scores = s_c + s_r
         if self.attn_logit_cap is not None:
