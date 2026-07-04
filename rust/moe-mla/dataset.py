@@ -156,7 +156,7 @@ class StreamingDataset:
             self._wiki_iter = None
             self._wiki_block_idx = 0
 
-        if getattr(self, "mezcla", False) and self.mix_mb > 0 and iterator is None:
+        if getattr(self, "mezcla", False) and self.mix_mb > 0:
             self._append_fineweb_maybe(mix_path)
 
     def _append_fineweb_maybe(self, mix_path=None):
@@ -243,8 +243,6 @@ class StreamingDataset:
         self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
         if not os.path.exists(self._path):
             self.download_block()
-        else:
-            self._append_fineweb_maybe()
         self._load_tokens_from_file()
         if len(self._tokens) < 1000:
             os.remove(self._path)
