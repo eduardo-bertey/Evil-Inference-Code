@@ -177,16 +177,19 @@ def main():
     ).to(device).to(dtype=dtype)
 
     # Weight decay groups: biases + norms no decay, weights sí
-    decay_params = [p for n, p in model.named_parameters() if p.dim() >= 2 and p.requires_grad]
+    # Embedding gets 1/4 LR (doubles gradient from tied head + lookup)
+    emb_params = [model.embedding.weight]
+    other_decay_params = [p for n, p in model.named_parameters() if p.dim() >= 2 and p.requires_grad and 'embedding' not in n]
     nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2 and p.requires_grad]
     optim_groups = [
-        {"params": decay_params, "weight_decay": 0.01},
+        {"params": emb_params, "weight_decay": 0.01, "lr_scale": 0.25},
+        {"params": other_decay_params, "weight_decay": 0.01},
         {"params": nodecay_params, "weight_decay": 0.0},
     ]
     fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
     use_fused = fused_available and device.type == "cuda"
     opt = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), fused=use_fused)
-    print(f"AdamW fused={use_fused} | decay={len(decay_params)} param tensors, nodecay={len(nodecay_params)}")
+    print(f"AdamW fused={use_fused} | decay={len(other_decay_params)} param tensors, emb_lr=lr/4, nodecay={len(nodecay_params)}")
 
     # ── Checkpoint ─────────────────────────────────────────────────────────
     step = 0
@@ -303,7 +306,7 @@ def main():
             if micro == 0:
                 lr_curr = get_lr(step, total_steps, warmup_steps, lr)
                 for pg in opt.param_groups:
-                    pg["lr"] = lr_curr
+                    pg["lr"] = lr_curr * pg.get("lr_scale", 1.0)
                 opt.zero_grad()
 
             logits, aux_loss = model(x)
