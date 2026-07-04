@@ -89,14 +89,12 @@ class StreamingDataset:
             appended += tam
         if appended == 0:
             if self._fineweb_iter is not None:
-                print(f"  FineWeb2-HQ stream exhausted at block {self._fineweb_block_idx}, wrapping to block 0")
+                print(f"  FineWeb2-HQ stream exhausted, wrapping to block {self.block_idx}")
             self._fineweb_iter = None
-            self._fineweb_block_idx = 0
             self._ensure_fineweb_iter()
             if self._fineweb_iter is None:
                 return [], 0
             return self._read_from_fineweb_iter(max_bytes)
-        self._fineweb_block_idx += 1
         return texts, appended
 
     def _new_wiki_iter(self):
