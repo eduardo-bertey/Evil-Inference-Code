@@ -25,6 +25,7 @@ class RMSNorm(nn.Module):
 class RoPE(nn.Module):
     def __init__(self, dim, max_len=512, base=10000.0):
         super().__init__()
+        self.dim = dim
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
         t = torch.arange(max_len).float()
@@ -33,12 +34,13 @@ class RoPE(nn.Module):
         self.register_buffer("sin", freqs.sin())
     def forward(self, q, k, offset=0):
         T = q.shape[1]
-        cos = self.cos[offset:offset+T].unsqueeze(0).unsqueeze(0)
-        sin = self.sin[offset:offset+T].unsqueeze(0).unsqueeze(0)
+        cos = self.cos[offset:offset+T].unsqueeze(0).unsqueeze(2)
+        sin = self.sin[offset:offset+T].unsqueeze(0).unsqueeze(2)
         def rot(x):
-            x1, x2 = x[..., ::2], x[..., 1::2]
-            return torch.stack([-x2, x1], dim=-1).flatten(-2)
-        return rot(q) * cos + k * cos + torch.stack([k[..., 1::2], -k[..., ::2]], dim=-1).flatten(-2) * sin
+            x1 = x[..., 0::2]
+            x2 = x[..., 1::2]
+            return torch.stack([x1*cos - x2*sin, x1*sin + x2*cos], dim=-1).flatten(-2)
+        return rot(q), rot(k)
 
 
 class BMAFilter(nn.Module):
@@ -200,20 +202,22 @@ class SharedCacheLayer(nn.Module):
 
         # Q local
         q = self.q_proj(h).reshape(B, S_new, self.num_heads, self.head_dim)
-        q, _ = self.rope(q, q, offset)
 
         # K, V locales (de x actual, sin cache propia)
         k_local = self.k_proj(h).reshape(B, S_new, self.num_kv_groups, self.head_dim)
         v_local = self.v_proj(h).reshape(B, S_new, self.num_kv_groups, self.head_dim)
 
+        # RoPE solo en q y k_local
+        q, k_local = self.rope(q, k_local, offset)
+
         if shared_cache is not None:
-            # Re-proyectar K, V de cache compartida al espacio de esta capa
+            # Cache de layer 1 ya tiene RoPE aplicado
             k_cached = self.k_reproj(shared_cache[0])
             v_cached = self.v_reproj(shared_cache[1])
         else:
             k_cached, v_cached = k_local, v_local
 
-        # Concatenar cache re-proyectado + local
+        # Concatenar cache (ya con RoPE) + local (con RoPE)
         k_full = torch.cat([k_cached, k_local], 1)
         v_full = torch.cat([v_cached, v_local], 1)
 
@@ -275,9 +279,7 @@ class CortexiaTransformer1(nn.Module):
                 x = torch.cat([x, next_tok], 1)
             return x.squeeze(0)
     def forward_with_cache(self, x, offset, caches):
-        h = self.emb(x) if offset == 0 else x
-        if offset == 0:
-            h = self.emb(x)
+        h = self.emb(x)
         new_caches = []
         for layer, cache in zip(self.layers, caches):
             h, new_cache = layer.forward_with_cache(h, offset, cache)
@@ -320,10 +322,7 @@ class CortexiaTransformer2(nn.Module):
                 x = torch.cat([x, next_tok], 1)
             return x.squeeze(0)
     def forward_with_cache(self, x, offset, shared_cache):
-        if offset == 0:
-            h = self.emb(x)
-        else:
-            h = x
+        h = self.emb(x)
         # Layer 1 produce la cache
         h, shared_cache = self.layer1.forward_with_cache(h, offset, shared_cache)
         # Capas 2-3 consultan cache compartida
@@ -367,10 +366,7 @@ class CortexiaTransformer3(nn.Module):
                 x = torch.cat([x, next_tok], 1)
             return x.squeeze(0)
     def forward_with_cache(self, x, offset, shared_cache):
-        if offset == 0:
-            h = self.emb(x)
-        else:
-            h = x
+        h = self.emb(x)
         # Layer 1 produce la cache
         h, shared_cache = self.layer1.forward_with_cache(h, offset, shared_cache)
         # Capas 2-3 consultan cache compartida
