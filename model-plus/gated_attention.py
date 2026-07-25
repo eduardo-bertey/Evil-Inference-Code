@@ -19,6 +19,7 @@ from rope import RoPE, apply_rope_partial
 from cache_kv import KVCache
 from attention import repeat_kv, QKVProjection, OutputProjection
 from mla_attention import QKVProjectionMLA, OutputProjectionMLA, RMSNorm
+from bma import BMAFilter
 
 
 class GatedAttention(nn.Module):
@@ -323,6 +324,7 @@ class MLAGatedAttention(nn.Module):
         use_xsa: bool = False,
         qk_norm: bool = True,
         gated_type: str = "headwise",  # "headwise" | "elementwise"
+        use_bma: bool = False,
     ):
         super().__init__()
         if num_kv_groups == 0:
@@ -348,6 +350,11 @@ class MLAGatedAttention(nn.Module):
         self.use_xsa = use_xsa
         self.qk_norm = qk_norm
         self.gated_type = gated_type
+        self.use_bma = use_bma
+
+        # BMA filter (pre-aggregation gating)
+        if use_bma:
+            self.bma_filter = BMAFilter(num_heads, head_dim)
 
         # QK-Norm
         if qk_norm:
@@ -469,6 +476,11 @@ class MLAGatedAttention(nn.Module):
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V, self.num_heads, self.num_kv_groups).transpose(1, 2)
+
+        # BMA: pre-aggregation gating (modulate V before SDPA)
+        if self.use_bma:
+            v = self.bma_filter(Q_state.transpose(1, 2), v)
+
         attn_out = torch.matmul(attn_w, v)  # (B, nh, T, hd)
 
         # XSA (orthogonal projection removal)
@@ -528,6 +540,11 @@ class MLAGatedAttention(nn.Module):
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
+
+        # BMA: pre-aggregation gating
+        if self.use_bma:
+            v = self.bma_filter(Q_state.transpose(1, 2), v)
+
         attn_out = torch.matmul(attn_w, v)
 
         if self.use_xsa:
@@ -586,6 +603,11 @@ class MLAGatedAttention(nn.Module):
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
+
+        # BMA: pre-aggregation gating
+        if self.use_bma:
+            v = self.bma_filter(Q_state.transpose(1, 2), v)
+
         attn_out = torch.matmul(attn_w, v)
 
         if self.use_xsa:

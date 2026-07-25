@@ -171,6 +171,14 @@ def main():
         attn_tag = "Standard"
     print(f"  Attention: {attn_tag}")
 
+    # ── BMA (Bilinearly Modulated Attention) ──────────────────────────────
+    use_bma = False
+    if use_mla:
+        bma_input = input("BMA pre-aggregation gating (s=si, n=no): ").strip().lower()
+        use_bma = bma_input == "s"
+        if use_bma:
+            print("  BMA: enabled (pre-aggregation gating)")
+
     # ── Tokenizer ──────────────────────────────────────────────────────────
     tokenizer = None
     if os.path.exists(tok_path):
@@ -212,6 +220,7 @@ def main():
         bias_decay=bias_decay,
         n_dense_start=n_dense_start, n_dense_end=n_dense_end,
         use_gated_attn=use_gated_attn, gated_type=gated_type,
+        use_bma=use_bma,
     ).to(device).to(dtype=dtype)
 
     # Weight decay groups: biases + norms no decay, weights sí

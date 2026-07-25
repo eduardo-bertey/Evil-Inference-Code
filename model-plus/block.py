@@ -139,6 +139,7 @@ class TransformerLayer(nn.Module):
         use_xsa: bool = False,
         qk_norm: bool = True,
         use_sandwich_norm: bool = False,
+        use_bma: bool = False,
     ):
         super().__init__()
 
@@ -159,7 +160,7 @@ class TransformerLayer(nn.Module):
                 attn_logit_cap=attn_logit_cap, bias=bias,
                 d_c=mla_d_c, d_c1=mla_d_c1, d_rotate=mla_d_rotate,
                 block_size=mla_block_size, use_xsa=use_xsa, qk_norm=qk_norm,
-                gated_type=gated_type,
+                gated_type=gated_type, use_bma=use_bma,
             )
         elif use_mla:
             self.attention = MultiHeadLatentAttentionGQA(
@@ -279,6 +280,7 @@ class Transformer(nn.Module):
         use_xsa: bool = False,
         qk_norm: bool = True,
         use_sandwich_norm: bool = False,
+        use_bma: bool = False,
     ):
         super().__init__()
         self.layers = nn.ModuleList([
@@ -312,6 +314,7 @@ class Transformer(nn.Module):
                 use_xsa=use_xsa,
                 qk_norm=qk_norm,
                 use_sandwich_norm=use_sandwich_norm,
+                use_bma=use_bma,
             )
             for _ in range(num_layers)
         ])

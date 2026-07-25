@@ -69,6 +69,7 @@ class LayerWithMoE(nn.Module):
         num_layers=1,
         use_gated_attn=False,
         gated_type="headwise",
+        use_bma=False,
     ):
         super().__init__()
 
@@ -102,7 +103,7 @@ class LayerWithMoE(nn.Module):
                 attn_logit_cap=attn_logit_cap, bias=bias,
                 d_c=mla_d_c, d_c1=mla_d_c1, d_rotate=mla_d_rotate,
                 block_size=mla_block_size, use_xsa=use_xsa, qk_norm=qk_norm,
-                gated_type=gated_type,
+                gated_type=gated_type, use_bma=use_bma,
             )
         elif use_mla:
             self.attention = MultiHeadLatentAttentionGQA(
@@ -229,7 +230,7 @@ class MoETransformer(nn.Module):
                  expert_dim=None, capacity_factor=1.35, z_loss_gamma=0.001,
                  bias_decay=1e-3, noise_std=0.005,
                  n_dense_start=3, n_dense_end=3,
-                 use_gated_attn=False, gated_type="headwise"):
+                 use_gated_attn=False, gated_type="headwise", use_bma=False):
         super().__init__()
 
         self.num_layers = num_layers
@@ -276,6 +277,7 @@ class MoETransformer(nn.Module):
                 noise_std=noise_std,
                 layer_idx=i, num_layers=num_layers,
                 use_gated_attn=use_gated_attn, gated_type=gated_type,
+                use_bma=use_bma,
             ))
         self.layers = nn.ModuleList(layers)
         self.final_norm = RMSNorm(d_model, eps=norm_eps)

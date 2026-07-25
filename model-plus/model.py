@@ -88,6 +88,7 @@ class TransformerLM(nn.Module):
         n_dense_end: int = 3,
         use_gated_attn: bool = False,
         gated_type: str = "headwise",
+        use_bma: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -135,6 +136,7 @@ class TransformerLM(nn.Module):
                 noise_std=noise_std,
                 n_dense_start=n_dense_start, n_dense_end=n_dense_end,
                 use_gated_attn=use_gated_attn, gated_type=gated_type,
+                use_bma=use_bma,
             )
         else:
             self.transformer = Transformer(
@@ -163,6 +165,7 @@ class TransformerLM(nn.Module):
             mla_d_rotate=mla_d_rotate, mla_block_size=mla_block_size,
             use_gated_attn=use_gated_attn, gated_type=gated_type,
             use_xsa=use_xsa, qk_norm=qk_norm, use_sandwich_norm=use_sandwich_norm,
+            use_bma=use_bma,
         )
         # Head anclado al embedding — no se puede desactivar
         self.head = TiedHead(self.embedding)
