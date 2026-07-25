@@ -639,12 +639,15 @@ class Transformer(nn.Module):
                 h = layer.ffn(h)
                 x = residual + h
 
-                # new_cache is (C_KV_full, K_rot_full) — store C_KV only
+                # Store full cache tuple (C_KV_full, K_rot_full) for MLA
                 if new_cache is not None:
-                    new_caches[group_idx] = new_cache[0]  # C_KV only
+                    new_caches[group_idx] = new_cache
             else:
-                # Shared cache layer: lee del cache de su grupo
+                # Shared cache layer: lee C_KV del cache de su grupo
                 group_idx = self._get_group_idx(i)
-                x = layer.forward_with_cache(x, offset, new_caches[group_idx])
+                cache = new_caches[group_idx]
+                # Extract C_KV only from full cache tuple
+                c_kv = cache[0] if isinstance(cache, tuple) else cache
+                x = layer.forward_with_cache(x, offset, c_kv)
 
         return self.final_norm(x), new_caches
