@@ -120,7 +120,7 @@ if __name__ == "__main__":
     SEQ_LEN = 64
     BATCH = 16
     EPOCHS = 30
-    LAYERS = 3
+    LAYERS = 12
     DIM = 128
     HEADS = 8
     KV_GROUPS = 4
