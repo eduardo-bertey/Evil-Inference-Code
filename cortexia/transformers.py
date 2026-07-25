@@ -195,6 +195,31 @@ class SharedCacheLayer(nn.Module):
             # Gate score desde Q
             self.gate_proj = nn.Linear(d_model, num_heads)
 
+    def forward(self, x, offset=0):
+        """Training forward — self-attention local sin cache compartida."""
+        B, S, _ = x.shape
+        h = self.norm1(x)
+        q = self.q_proj(h).reshape(B, S, self.num_heads, self.head_dim)
+        k = self.k_proj(h).reshape(B, S, self.num_kv_groups, self.head_dim)
+        v = self.v_proj(h).reshape(B, S, self.num_kv_groups, self.head_dim)
+        q, k = self.rope(q, k, offset)
+        n = self.num_heads // self.num_kv_groups
+        k, v = k.repeat_interleave(n, 2), v.repeat_interleave(n, 2)
+        q, k, v = [t.transpose(1,2) for t in (q, k, v)]
+        if self.use_bma:
+            v = self.bma(q, v)
+        scores = (q @ k.transpose(-2,-1)) * self.scale
+        if S > 1:
+            mask = torch.triu(torch.full((S, S), float("-inf"), device=x.device), diagonal=1)
+            scores = scores + mask
+        h2 = (F.softmax(scores, -1) @ v).transpose(1,2).flatten(2)
+        if self.use_gated:
+            gate = self.gate_proj(h).unsqueeze(-1).expand(-1, -1, self.head_dim)
+            h2 = h2 * torch.sigmoid(gate)
+        x = x + self.o_proj(h2)
+        x = x + self.ffn(self.norm2(x))
+        return x
+
     def forward_with_cache(self, x, offset, shared_cache):
         """Consulta cache compartida de layer 1 con proyecciones locales."""
         B, S_new, _ = x.shape
