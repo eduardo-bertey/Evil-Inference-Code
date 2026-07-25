@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from attention import Attention
-from gated_attention import GatedAttention
+from gated_attention import GatedAttention, MLAGatedAttention
 from mla_attention import MultiHeadLatentAttentionGQA
 from cache_kv import KVCache
 
@@ -136,6 +136,9 @@ class TransformerLayer(nn.Module):
         mla_block_size: int = 128,
         use_gated_attn: bool = False,
         gated_type: str = "headwise",
+        use_xsa: bool = False,
+        qk_norm: bool = True,
+        use_sandwich_norm: bool = False,
     ):
         super().__init__()
 
@@ -148,14 +151,24 @@ class TransformerLayer(nn.Module):
         self.attn_norm = RMSNorm(d_model, eps=norm_eps)
         # MLA + GQA or standard GQA (no sparse in MLA project)
         self.use_mla = use_mla
-        if use_mla:
+        if use_mla and use_gated_attn:
+            self.attention = MLAGatedAttention(
+                d_model=d_model, num_heads=num_heads, num_kv_groups=num_kv_groups,
+                head_dim=head_dim, max_seq_len=max_seq_len, rope_base=rope_base,
+                rope_scaling=rope_scaling, causal=causal, dropout=attn_dropout,
+                attn_logit_cap=attn_logit_cap, bias=bias,
+                d_c=mla_d_c, d_c1=mla_d_c1, d_rotate=mla_d_rotate,
+                block_size=mla_block_size, use_xsa=use_xsa, qk_norm=qk_norm,
+                gated_type=gated_type,
+            )
+        elif use_mla:
             self.attention = MultiHeadLatentAttentionGQA(
                 d_model=d_model, num_heads=num_heads, num_kv_groups=num_kv_groups,
                 head_dim=head_dim, max_seq_len=max_seq_len, rope_base=rope_base,
                 rope_scaling=rope_scaling, causal=causal, dropout=attn_dropout,
                 attn_logit_cap=attn_logit_cap, bias=bias,
                 d_c=mla_d_c, d_c1=mla_d_c1, d_rotate=mla_d_rotate,
-                block_size=mla_block_size,
+                block_size=mla_block_size, use_xsa=use_xsa, qk_norm=qk_norm,
             )
         elif use_gated_attn:
             self.attention = GatedAttention(
@@ -263,6 +276,9 @@ class Transformer(nn.Module):
         mla_block_size: int = 128,
         use_gated_attn: bool = False,
         gated_type: str = "headwise",
+        use_xsa: bool = False,
+        qk_norm: bool = True,
+        use_sandwich_norm: bool = False,
     ):
         super().__init__()
         self.layers = nn.ModuleList([
@@ -293,6 +309,9 @@ class Transformer(nn.Module):
                 mla_block_size=mla_block_size,
                 use_gated_attn=use_gated_attn,
                 gated_type=gated_type,
+                use_xsa=use_xsa,
+                qk_norm=qk_norm,
+                use_sandwich_norm=use_sandwich_norm,
             )
             for _ in range(num_layers)
         ])

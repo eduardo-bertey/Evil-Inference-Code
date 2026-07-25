@@ -7,8 +7,7 @@ Implements post-SDPA gating with query-dependent sparse gates:
   - Headwise: one scalar gate per attention head
   - Elementwise: one gate per element in the attention output
 
-Compatible with Attention interface (forward, forward_with_cache,
-forward_with_cache_partial) and with MLA.
+Also includes MLAGatedAttention: MLA compression + post-SDPA gating.
 """
 
 import math
@@ -19,6 +18,7 @@ import torch.nn.functional as F
 from rope import RoPE, apply_rope_partial
 from cache_kv import KVCache
 from attention import repeat_kv, QKVProjection, OutputProjection
+from mla_attention import QKVProjectionMLA, OutputProjectionMLA, RMSNorm
 
 
 class GatedAttention(nn.Module):
@@ -291,3 +291,310 @@ class GatedAttention(nn.Module):
             diagonal=offset + 1,
         )
         return scores + mask.unsqueeze(0).unsqueeze(0)
+
+
+class MLAGatedAttention(nn.Module):
+    """MLA + Gated Attention: latent compression + post-SDPA gating.
+
+    Combines MLA's KV compression for cache efficiency with gated
+    attention's post-SDPA gating for better attention patterns.
+
+    Cache stores: (C_KV, K_rotate_raw) — same as MLA.
+    Gate scores are derived from Q_state (content part of Q).
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        num_kv_groups: int = 0,
+        head_dim: int | None = None,
+        max_seq_len: int = 2048,
+        rope_base: float = 10000.0,
+        rope_scaling: float = 1.0,
+        causal: bool = True,
+        dropout: float = 0.0,
+        attn_logit_cap: float | None = None,
+        bias: bool = False,
+        d_c: int | None = None,
+        d_c1: int | None = None,
+        d_rotate: int | None = None,
+        block_size: int = 128,
+        use_xsa: bool = False,
+        qk_norm: bool = True,
+        gated_type: str = "headwise",  # "headwise" | "elementwise"
+    ):
+        super().__init__()
+        if num_kv_groups == 0:
+            num_kv_groups = num_heads
+        if head_dim is None:
+            head_dim = d_model // num_heads
+        if d_c is None:
+            d_c = max(32, d_model // 6)
+        if d_c1 is None:
+            d_c1 = max(32, d_model // 6)
+        if d_rotate is None:
+            d_rotate = max(16, d_model // 12)
+
+        self.num_heads = num_heads
+        self.num_kv_groups = num_kv_groups
+        self.head_dim = head_dim
+        self.d_rotate = d_rotate
+        self.d_c = d_c
+        self.d_c1 = d_c1
+        self.causal = causal
+        self.attn_logit_cap = attn_logit_cap
+        self.block_size = block_size
+        self.use_xsa = use_xsa
+        self.qk_norm = qk_norm
+        self.gated_type = gated_type
+
+        # QK-Norm
+        if qk_norm:
+            self.q_norm = RMSNorm(head_dim)
+            self.k_norm = RMSNorm(head_dim)
+
+        # MLA QKV projection (shared latent)
+        self.qkv = QKVProjectionMLA(d_model, num_heads, num_kv_groups, head_dim,
+                                     d_c, d_c1, d_rotate, bias)
+        self.o_proj = OutputProjectionMLA(d_model, num_heads, head_dim, bias)
+
+        # Gate projection from Q_state content
+        # Gate scores come from the content part of Q, not the rotary part
+        if gated_type == "headwise":
+            # 1 scalar per head
+            self.gate_proj = nn.Linear(d_c1, num_heads, bias=bias)
+        elif gated_type == "elementwise":
+            # d_head values per head
+            self.gate_proj = nn.Linear(d_c1, num_heads * head_dim, bias=bias)
+        else:
+            raise ValueError(f"Unknown gated_type: {gated_type}")
+
+        # RoPE on rotary dimension
+        self.rope = RoPE(head_dim=d_rotate, max_seq_len=max_seq_len,
+                         base=rope_base, scaling_factor=rope_scaling)
+        self.rope.head_dim = d_rotate
+        self.attn_dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+
+        if causal:
+            mask = torch.triu(torch.full((max_seq_len, max_seq_len), float("-inf")), diagonal=1)
+            self.register_buffer("causal_mask", mask, persistent=False)
+
+        self.apply(self._init_weights)
+
+    def _init_weights(self, m):
+        if isinstance(m, nn.Linear):
+            nn.init.normal_(m.weight, mean=0.0, std=0.02)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, RMSNorm):
+            nn.init.ones_(m.weight)
+
+    def _decoupled_scores(self, Q_state, Q_rot, K_state, K_rot, seq_len, kv_len=None, causal=None):
+        """Decoupled content + RoPE scoring (same as MLA)."""
+        nh, nkv, hd, dr = self.num_heads, self.num_kv_groups, self.head_dim, self.d_rotate
+        scale_c = 1.0 / math.sqrt(self.d_c) if self.qk_norm else 1.0 / math.sqrt(hd)
+        scale_r = 1.0 if self.qk_norm else 1.0 / math.sqrt(dr)
+
+        k_c = repeat_kv(K_state, nh, nkv).transpose(1, 2)
+        q_c = Q_state.transpose(1, 2)
+        s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) * scale_c
+
+        q_r = Q_rot.transpose(1, 2)
+        k_r = K_rot.transpose(1, 2).expand(-1, nh, -1, -1)
+        s_r = torch.matmul(q_r, k_r.transpose(-2, -1)) * scale_r
+
+        scores = s_c + s_r
+        if self.attn_logit_cap is not None:
+            scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
+
+        is_causal = self.causal if causal is None else causal
+        if is_causal:
+            if kv_len is None:
+                kv_len = K_state.shape[1]
+            if seq_len > 1:
+                if seq_len == kv_len:
+                    if seq_len <= self.causal_mask.shape[0]:
+                        scores = scores + self.causal_mask[:seq_len, :seq_len]
+                    else:
+                        mask = torch.triu(torch.full((seq_len, seq_len), float("-inf"),
+                                                      device=scores.device), diagonal=1)
+                        scores = scores + mask
+                else:
+                    mask = torch.triu(
+                        torch.full((seq_len, kv_len), float("-inf"), device=scores.device),
+                        diagonal=kv_len - seq_len + 1
+                    )
+                    scores = scores + mask
+        return scores
+
+    def _compute_gate(self, C_Q: torch.Tensor, B: int, S: int):
+        """Compute gate scores from MLA's C_Q latent.
+
+        C_Q: (B, S, d_c1) — the content latent
+        Returns: (B, S, num_heads, 1) for headwise or (B, S, num_heads, head_dim) for elementwise
+        """
+        gate_raw = self.gate_proj(C_Q)  # (B, S, num_heads) or (B, S, num_heads * head_dim)
+        if self.gated_type == "headwise":
+            return gate_raw.reshape(B, S, self.num_heads, 1)
+        else:
+            return gate_raw.reshape(B, S, self.num_heads, self.head_dim)
+
+    def _expand_gate(self, gate_score: torch.Tensor):
+        """Expand gate to (B, S, num_heads, head_dim)."""
+        if self.gated_type == "headwise":
+            return gate_score.expand(-1, -1, -1, self.head_dim)
+        return gate_score  # already (B, S, H, D) for elementwise
+
+    def forward(self, x: torch.Tensor, offset: int = 0) -> torch.Tensor:
+        """Full forward (training, no cache)."""
+        B, T, _ = x.shape
+
+        # MLA: compress and decompress
+        Q_state, Q_rotate, K, V, K_rotate = self.qkv(x)
+        Q_rotate, K_rotate = self.rope(Q_rotate, K_rotate, offset)
+
+        # Gate from C_Q (before W_up_q expansion, we need C_Q)
+        # Re-derive C_Q from x: C_Q = norm(W_down(x)[:d_c1])
+        down = self.qkv.W_down(x)
+        C_Q, _, _ = down.split([self.qkv.d_c1, self.qkv.d_c, self.qkv.d_rotate], dim=-1)
+        C_Q = self.qkv.norm_cq(C_Q)
+        gate_score = self._compute_gate(C_Q, B, T)
+
+        if self.qk_norm:
+            Q_state = self.q_norm(Q_state)
+            K = self.k_norm(K)
+
+        scores = self._decoupled_scores(Q_state, Q_rotate, K, K_rotate, T)
+        attn_w = F.softmax(scores, dim=-1)
+        attn_w = self.attn_dropout(attn_w)
+        v = repeat_kv(V, self.num_heads, self.num_kv_groups).transpose(1, 2)
+        attn_out = torch.matmul(attn_w, v)  # (B, nh, T, hd)
+
+        # XSA (orthogonal projection removal)
+        if self.use_xsa:
+            Vn = F.normalize(v, dim=-1)
+            attn_out = attn_out - (attn_out * Vn).sum(dim=-1, keepdim=True) * Vn
+
+        # Post-SDPA gating
+        attn_out = attn_out.transpose(1, 2)  # (B, T, nh, hd)
+        gate_expanded = self._expand_gate(gate_score)
+        attn_out = attn_out * torch.sigmoid(gate_expanded)
+
+        return self.o_proj(attn_out)
+
+    def forward_with_cache(self, x: torch.Tensor, offset: int, cache) -> tuple[torch.Tensor, tuple]:
+        """Forward with MLA latent cache + gated attention."""
+        B, S_new, _ = x.shape
+
+        # MLA compress
+        down = self.qkv.W_down(x)
+        C_Q_new, C_KV_new, K_rot_raw = down.split([self.qkv.d_c1, self.qkv.d_c, self.qkv.d_rotate], dim=-1)
+        C_Q_new = self.qkv.norm_cq(C_Q_new)
+        C_KV_new = self.qkv.norm_ckv(C_KV_new)
+
+        # Gate from C_Q
+        gate_score = self._compute_gate(C_Q_new, B, S_new)
+
+        # Q from C_Q
+        q_up = self.qkv.W_up_q(C_Q_new)
+        Q_state, Q_rot_raw = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
+        Q_state = Q_state.reshape(B, S_new, self.num_heads, self.head_dim)
+        Q_rot_raw = Q_rot_raw.reshape(B, S_new, self.num_heads, self.d_rotate)
+        Q_rot = self.rope.apply_to_single(Q_rot_raw, offset=offset)
+
+        # Cache
+        if cache is not None:
+            C_KV_full = torch.cat([cache[0], C_KV_new], dim=1)
+            K_rot_full = torch.cat([cache[1], K_rot_raw], dim=1)
+        else:
+            C_KV_full = C_KV_new
+            K_rot_full = K_rot_raw
+        S_full = C_KV_full.shape[1]
+
+        # KV decompress
+        kv_up = self.qkv.W_up_kv(C_KV_full)
+        K_state, V_state = kv_up.chunk(2, dim=-1)
+        K_state = K_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
+        V_state = V_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
+
+        K_rot = self.rope.apply_to_single(K_rot_full.unsqueeze(2), offset=0)
+
+        # Attention
+        if self.qk_norm:
+            Q_state = self.q_norm(Q_state)
+            K_state = self.k_norm(K_state)
+        scores = self._decoupled_scores(Q_state, Q_rot, K_state, K_rot, S_new, S_full, S_new > 1)
+        attn_w = F.softmax(scores, dim=-1)
+        attn_w = self.attn_dropout(attn_w)
+        v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
+        attn_out = torch.matmul(attn_w, v)
+
+        if self.use_xsa:
+            v_new = v[:, :, -S_new:, :]
+            Vn = F.normalize(v_new, dim=-1)
+            attn_out = attn_out - (attn_out * Vn).sum(dim=-1, keepdim=True) * Vn
+
+        # Post-SDPA gating
+        attn_out = attn_out.transpose(1, 2)
+        gate_expanded = self._expand_gate(gate_score)
+        attn_out = attn_out * torch.sigmoid(gate_expanded)
+
+        return self.o_proj(attn_out), (C_KV_full, K_rot_full)
+
+    def forward_with_cache_partial(self, x: torch.Tensor, offset: int, cache, rotary_pct: float):
+        """Forward with MLA latent cache + partial RoPE + gated attention."""
+        B, S_new, _ = x.shape
+
+        down = self.qkv.W_down(x)
+        C_Q_new, C_KV_new, K_rot_raw = down.split([self.qkv.d_c1, self.qkv.d_c, self.qkv.d_rotate], dim=-1)
+        C_Q_new = self.qkv.norm_cq(C_Q_new)
+        C_KV_new = self.qkv.norm_ckv(C_KV_new)
+
+        gate_score = self._compute_gate(C_Q_new, B, S_new)
+
+        q_up = self.qkv.W_up_q(C_Q_new)
+        Q_state, Q_rot_raw = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
+        Q_state = Q_state.reshape(B, S_new, self.num_heads, self.head_dim)
+        Q_rot_raw = Q_rot_raw.reshape(B, S_new, self.num_heads, self.d_rotate)
+
+        Q_rot, _ = apply_rope_partial(Q_rot_raw, Q_rot_raw, offset, rotary_pct,
+            self.rope.inv_freq, self.rope.cos_cache, self.rope.sin_cache,
+            self.rope.head_dim, self.rope.max_seq_len)
+
+        if cache is not None:
+            C_KV_full = torch.cat([cache[0], C_KV_new], dim=1)
+            K_rot_full = torch.cat([cache[1], K_rot_raw], dim=1)
+        else:
+            C_KV_full = C_KV_new
+            K_rot_full = K_rot_raw
+        S_full = C_KV_full.shape[1]
+
+        kv_up = self.qkv.W_up_kv(C_KV_full)
+        K_state, V_state = kv_up.chunk(2, dim=-1)
+        K_state = K_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
+        V_state = V_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
+
+        _, K_rot = apply_rope_partial(K_rot_full.unsqueeze(2), K_rot_full.unsqueeze(2), 0, rotary_pct,
+            self.rope.inv_freq, self.rope.cos_cache, self.rope.sin_cache,
+            self.rope.head_dim, self.rope.max_seq_len)
+
+        if self.qk_norm:
+            Q_state = self.q_norm(Q_state)
+            K_state = self.k_norm(K_state)
+        scores = self._decoupled_scores(Q_state, Q_rot, K_state, K_rot, S_new, S_full, S_new > 1)
+        attn_w = F.softmax(scores, dim=-1)
+        attn_w = self.attn_dropout(attn_w)
+        v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
+        attn_out = torch.matmul(attn_w, v)
+
+        if self.use_xsa:
+            v_new = v[:, :, -S_new:, :]
+            Vn = F.normalize(v_new, dim=-1)
+            attn_out = attn_out - (attn_out * Vn).sum(dim=-1, keepdim=True) * Vn
+
+        attn_out = attn_out.transpose(1, 2)
+        gate_expanded = self._expand_gate(gate_score)
+        attn_out = attn_out * torch.sigmoid(gate_expanded)
+
+        return self.o_proj(attn_out), (C_KV_full, K_rot_full)

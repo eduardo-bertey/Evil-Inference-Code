@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 
 from attention import Attention
-from gated_attention import GatedAttention
+from gated_attention import GatedAttention, MLAGatedAttention
 from mla_attention import MultiHeadLatentAttentionGQA
 from block import RMSNorm, compute_intermediate_dim
 from moe import MoELayer, DenseFFN
@@ -93,8 +93,18 @@ class LayerWithMoE(nn.Module):
         self.attn_norm = RMSNorm(d_model, eps=norm_eps)
         self.ffn_norm = RMSNorm(d_model, eps=norm_eps)
 
-        # Attention (MLA, Gated, or standard GQA)
-        if use_mla:
+        # Attention (MLA+Gated, MLA, Gated, or standard GQA)
+        if use_mla and use_gated_attn:
+            self.attention = MLAGatedAttention(
+                d_model=d_model, num_heads=num_heads, num_kv_groups=num_kv_groups,
+                head_dim=head_dim, max_seq_len=max_seq_len, rope_base=rope_base,
+                rope_scaling=rope_scaling, causal=causal, dropout=attn_dropout,
+                attn_logit_cap=attn_logit_cap, bias=bias,
+                d_c=mla_d_c, d_c1=mla_d_c1, d_rotate=mla_d_rotate,
+                block_size=mla_block_size, use_xsa=use_xsa, qk_norm=qk_norm,
+                gated_type=gated_type,
+            )
+        elif use_mla:
             self.attention = MultiHeadLatentAttentionGQA(
                 d_model=d_model, num_heads=num_heads, num_kv_groups=num_kv_groups,
                 head_dim=head_dim, max_seq_len=max_seq_len, rope_base=rope_base,

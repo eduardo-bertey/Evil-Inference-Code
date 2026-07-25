@@ -162,6 +162,7 @@ class TransformerLM(nn.Module):
             mla_d_c=mla_d_c, mla_d_c1=mla_d_c1,
             mla_d_rotate=mla_d_rotate, mla_block_size=mla_block_size,
             use_gated_attn=use_gated_attn, gated_type=gated_type,
+            use_xsa=use_xsa, qk_norm=qk_norm, use_sandwich_norm=use_sandwich_norm,
         )
         # Head anclado al embedding — no se puede desactivar
         self.head = TiedHead(self.embedding)

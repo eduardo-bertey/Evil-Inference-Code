@@ -140,7 +140,7 @@ def main():
     print(f"  Compute: {dtype}  |  Weights: {master}  |  AMP: {amp}  |  Scaler: {scaler.get_scale() if amp else 'off'}")
 
     # ── Attention Type ────────────────────────────────────────────────────
-    attn_input = input("Atencion (n=standard, h=headwise, e=elementwise, m=MLA): ").strip().lower()
+    attn_input = input("Atencion (n=standard, h=headwise, e=elementwise, m=MLA, g=MLA+gated): ").strip().lower()
     if attn_input == "h":
         use_gated_attn = True
         gated_type = "headwise"
@@ -149,13 +149,26 @@ def main():
         use_gated_attn = True
         gated_type = "elementwise"
         use_mla = False
+    elif attn_input == "g":
+        use_gated_attn = True
+        gated_type = "headwise"
+        use_mla = True
     elif attn_input == "m":
         use_gated_attn = False
+        gated_type = "headwise"
         use_mla = True
     else:
         use_gated_attn = False
+        gated_type = "headwise"
         use_mla = False
-    attn_tag = f"Gated({gated_type})" if use_gated_attn else ("MLA" if use_mla else "Standard")
+    if use_mla and use_gated_attn:
+        attn_tag = f"MLA+Gated({gated_type})"
+    elif use_gated_attn:
+        attn_tag = f"Gated({gated_type})"
+    elif use_mla:
+        attn_tag = "MLA"
+    else:
+        attn_tag = "Standard"
     print(f"  Attention: {attn_tag}")
 
     # ── Tokenizer ──────────────────────────────────────────────────────────
@@ -289,7 +302,8 @@ def main():
         xsa_tag = " + XSA" if use_xsa else ""
         qkn_tag = " + QK-Norm" if qk_norm else ""
         sn_tag = " + SandwichNorm" if use_sandwich_norm else ""
-        print(f"MLA{xsa_tag}{qkn_tag}{sn_tag}: d_c={d_c_real} d_c1={d_c1_real} d_rot={d_rot_real} | cache: {gqa_cpt}→{cpt}B/tok ({pct:.0f}%)")
+        gated_tag = f" + Gated({gated_type})" if use_gated_attn else ""
+        print(f"MLA{gated_tag}{xsa_tag}{qkn_tag}{sn_tag}: d_c={d_c_real} d_c1={d_c1_real} d_rot={d_rot_real} | cache: {gqa_cpt}→{cpt}B/tok ({pct:.0f}%)")
     elif use_gated_attn:
         qkn_tag = " + QK-Norm" if qk_norm else ""
         sn_tag = " + SandwichNorm" if use_sandwich_norm else ""
