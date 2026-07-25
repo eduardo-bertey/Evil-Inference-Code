@@ -57,7 +57,7 @@ def get_lr(step, total, warmup, lr):
 
 # ─── Config Cortexia ─────────────────────────────────────────────────────────
 d_model = 512
-num_layers = 20
+num_layers = 24
 num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
