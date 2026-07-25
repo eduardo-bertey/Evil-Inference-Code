@@ -1,332 +1,91 @@
 <div align="center">
 
-# xLSTM: Extended Long Short-Term Memory
+# Evil Inference Code
 
-[![Paper](https://img.shields.io/static/v1?label=Paper&message=2405.04517&color=B31B1B&logo=arXiv)](https://arxiv.org/abs/2405.04517)
-[![PyPI](https://img.shields.io/pypi/v/xlstm?color=blue)](https://pypi.org/project/xlstm/)
-[![PyPI Downloads](https://static.pepy.tech/personalized-badge/xlstm?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=BLUE&left_text=downloads)](https://pepy.tech/projects/tirex-ts)
-![GitHub Repo stars](https://img.shields.io/github/stars/NX-AI/xlstm)
+Distributed inference engine for Transformers, minGRU, minLSTM, and xLSTM — with BitNet (1.58-bit) support.
+
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
-
-![xLSTM Figure](./res/desc_xlstm_overview.svg)
+![Rust](https://img.shields.io/badge/Language-Rust-orange)
 
 </div>
 
-> **Paper:** https://arxiv.org/abs/2405.04517
->
-> **Authors:** Maximilian Beck, Korbinian Pöppel, Markus Spanring, Andreas Auer, Oleksandra Prudnikova, Michael Kopp, Günter Klambauer, Johannes Brandstetter, Sepp Hochreiter
-
 ## About
 
-xLSTM is a new Recurrent Neural Network architecture based on ideas of the original LSTM.
-Through Exponential Gating with appropriate normalization and stabilization techniques and a new Matrix Memory it overcomes the limitations of the original LSTM 
-and shows promising performance on Language Modeling when compared to Transformers or State Space Models.
+Evil Inference Code is a high-performance distributed inference system implementing multiple neural network architectures in both Python and Rust:
 
-:rotating_light: We trained a 7B parameter xLSTM Language Model on 2.3T tokens! :rotating_light:
+- **Transformers** — standard attention-based models
+- **minGRU** — minimal gated recurrent units
+- **minLSTM** — minimal long short-term memory networks
+- **xLSTM** — extended LSTM with exponential gating and matrix memory
+- **BitNet (1.58-bit)** — ternary quantization for efficient inference
 
-We refer to the optimized architecture for our xLSTM 7B as xLSTM Large. 
+The system is designed for **distributed inference** across multiple devices/nodes, enabling large-scale model deployment with low latency.
 
-## Minimal Installation
+## Project Structure
 
-Create a conda environment from the file `environment_pt240cu124.yaml`.
-Install the model code only (i.e. the module `xlstm`) as package:
-
-For using the xLSTM Large 7B model install [`mlstm_kernels`](https://github.com/NX-AI/mlstm_kernels) via:
-``` 
-pip install mlstm_kernels
 ```
-Then install the xlstm package via pip: 
-```bash
-pip install xlstm
-```
-Or clone from github:
-```bash
-git clone https://github.com/NX-AI/xlstm.git
-cd xlstm
-pip install -e .
+evil-inference-code/
+├── src/           # Rust implementation (core inference engine)
+├── python/        # Python bindings and model definitions
+├── models/        # Model configurations and weights
+└── examples/      # Usage examples
 ```
 
 ## Requirements
 
-This package is based on PyTorch and was tested for versions `>=1.8`. For a well-tested environment, install the `environment_pt240cu124.yaml` as:
-```bash
-conda env create -n xlstm -f environment_pt240cu124.yaml
-conda activate xlstm
-``` 
+- Rust (latest stable)
+- Python 3.10+
+- PyTorch >= 2.0
 
-For the xLSTM Large 7B model we require our [`mlstm_kernels`](https://github.com/NX-AI/mlstm_kernels) package, which provides fast kernels for the xLSTM.
+## Installation
 
-<div align="center">
-
-# xLSTM 7B: A Recurrent LLM for Fast and Efficient Inference
-[![Paper](https://img.shields.io/static/v1?label=Paper&message=2503.13427&color=B31B1B&logo=arXiv)](https://arxiv.org/abs/2503.13427)
-[![Hugging Face](https://img.shields.io/badge/HuggingFace-xLSTM_7B-yellow?logo=huggingface)](https://huggingface.co/NX-AI/xLSTM-7b)
-[![License](https://img.shields.io/badge/license-nxai_community-green)](https://github.com/NX-AI/tirex-internal/blob/main/LICENSE)
-
-
-> **Paper:** https://arxiv.org/abs/2503.13427
->
-> **Authors:** Maximilian Beck, Korbinian Pöppel, Phillip Lippe, Richard Kurle, Patrick M. Blies, Günter Klambauer, Sebastian Böck, Sepp Hochreiter
-
-![xLSTM Figure](./res/xlstm_7b_poster.svg)
-
-</div>
-
-We have optimized the xLSTM architecture in terms of training throughput and stability. 
-The code for the updated architecture is located in `xlstm/xlstm_large`.
-
-The model weights are available on Huggingface at https://huggingface.co/NX-AI/xLSTM-7b. 
-
-## How to use the xLSTM Large 7B and its architecture
-
-We provide a standalone single file implementation of the xLSTM Large architecture in [`xlstm/xlstm_large/model.py`](https://github.com/NX-AI/xlstm/blob/main/xlstm/xlstm_large/model.py).
-This implementation requires our [`mlstm_kernels`](https://github.com/NX-AI/mlstm_kernels) package and other than that has no dependency on the NeurIPS xLSTM architecture implementation.
-
-For a quick start, we provide a [`demo.ipynb`](https://github.com/NX-AI/xlstm/blob/main/notebooks/xlstm_large/demo.ipynb) notebook for the xLSTM Large architecture at `notebooks/xlstm_large/demo.ipynb`. 
-
-In this notebook we import our config and model class, initialize a random model and perform a forward pass, like so:
-
-```python
-import torch
-from xlstm.xlstm_large.model import xLSTMLargeConfig, xLSTMLarge
-
-# configure the model with TFLA Triton kernels
-xlstm_config = xLSTMLargeConfig(
-    embedding_dim=512,
-    num_heads=4,
-    num_blocks=6,
-    vocab_size=2048,
-    return_last_states=True,
-    mode="inference",
-    chunkwise_kernel="chunkwise--triton_xl_chunk", # xl_chunk == TFLA kernels
-    sequence_kernel="native_sequence__triton",
-    step_kernel="triton",
-)
-# instantiate the model
-xlstm = xLSTMLarge(xlstm_config)
-xlstm = xlstm.to("cuda")
-# create inputs
-input = torch.randint(0, 2048, (3, 256)).to("cuda")
-# run a forward pass
-out = xlstm(input)
-out.shape[1:] == (256, 2048)
-```
-
-## Recommendation for other hardware
-
-We have tested our model mostly on NVIDIA GPUs, however our Triton kernels should also run on AMD GPUs. 
-For other platforms, like Apple Metal, we recommend using the native PyTorch implementations for now:
-
-```python 
-xlstm_config = xLSTMLargeConfig(
-    embedding_dim=512,
-    num_heads=4,
-    num_blocks=6,
-    vocab_size=2048,
-    return_last_states=True,
-    mode="inference",
-    chunkwise_kernel="chunkwise--native_autograd", # no Triton kernels
-    sequence_kernel="native_sequence__native", # no Triton kernels
-    step_kernel="native", # no Triton kernels
-)
-```
-
-If you are working inside Apple's MLX ecosystem, check out the community-driven
-[xLSTM-metal](https://github.com/MLXPorts/xLSTM-metal) port which provides an
-MLX-native implementation of xLSTM targeting Apple Silicon.
-
-# Models from the xLSTM NeurIPS Paper
-
-This section explains how to use the models from the xLSTM paper.
-
-## How to use the xLSTM architecture from our NeurIPS paper
-
-For non language applications or for integrating in other architectures you can use the `xLSTMBlockStack` and for language modeling or other token-based applications you can use the `xLSTMLMModel`.
-
-### Using the sLSTM CUDA kernels
-
-For the CUDA version of sLSTM, you need Compute Capability >= 8.0, see [https://developer.nvidia.com/cuda-gpus](https://developer.nvidia.com/cuda-gpus). If you have problems with the compilation, please try (thanks to [@zia1138](https://github.com/zia1138) for pointing out):
-```bash
-export TORCH_CUDA_ARCH_LIST="8.0;8.6;9.0"
-```
-
-For all kinds of custom setups with torch and CUDA, keep in mind that versions have to match. Also, to make sure the correct CUDA libraries are included you can use the "XLSTM_EXTRA_INCLUDE_PATHS" environment variable now to inject different include paths, e.g.:
+### Rust
 
 ```bash
-export XLSTM_EXTRA_INCLUDE_PATHS='/usr/local/include/cuda/:/usr/include/cuda/'
+cargo build --release
 ```
 
-or within python:
+### Python
+
+```bash
+pip install -r requirements.txt
+```
+
+## Quick Start
+
+```rust
+// Rust distributed inference example
+use evil_inference::distributed::InferenceCluster;
+
+let cluster = InferenceCluster::new(vec!["node1:8080", "node2:8080"]);
+let model = cluster.load_model("path/to/model");
+let output = model.generate(&input_tokens);
+```
 
 ```python
-import os
-os.environ['XLSTM_EXTRA_INCLUDE_PATHS']='/usr/local/include/cuda/:/usr/include/cuda/'
+# Python inference example
+from evil_inference import DistributedInference
+
+engine = DistributedInference(nodes=["node1:8080", "node2:8080"])
+model = engine.load_model("path/to/model")
+output = model.generate(input_tokens)
 ```
 
-for standalone, even faster sLSTM kernels, feel free to use the [FlashRNN](https://github.com/NX-AI/flashrnn) library.
+## Supported Architectures
 
-### xLSTM Block Stack
+| Architecture | Quantization | Distributed |
+|-------------|--------------|-------------|
+| Transformer | FP16, INT8, BitNet | ✓ |
+| minGRU | FP16, INT8 | ✓ |
+| minLSTM | FP16, INT8 | ✓ |
+| xLSTM | FP16, INT8, BitNet | ✓ |
 
-The `xLSTMBLockStack` is meant for use as alternative backbone in existing projects. It is similar to a stack of Transformer blocks, but uses xLSTM blocks:
+## References
 
-```python
-import torch
+- **xLSTM:** [Extended Long Short-Term Memory](https://arxiv.org/abs/2405.04517)
+- **minGRU/minLSTM:** [Were RNNs All We Needed?](https://arxiv.org/abs/2405.21060)
+- **BitNet:** [The Era of 1-bit LLMs](https://arxiv.org/abs/2402.17764)
 
-from xlstm import (
-    xLSTMBlockStack,
-    xLSTMBlockStackConfig,
-    mLSTMBlockConfig,
-    mLSTMLayerConfig,
-    sLSTMBlockConfig,
-    sLSTMLayerConfig,
-    FeedForwardConfig,
-)
+## License
 
-cfg = xLSTMBlockStackConfig(
-    mlstm_block=mLSTMBlockConfig(
-        mlstm=mLSTMLayerConfig(
-            conv1d_kernel_size=4, qkv_proj_blocksize=4, num_heads=4
-        )
-    ),
-    slstm_block=sLSTMBlockConfig(
-        slstm=sLSTMLayerConfig(
-            backend="cuda",
-            num_heads=4,
-            conv1d_kernel_size=4,
-            bias_init="powerlaw_blockdependent",
-        ),
-        feedforward=FeedForwardConfig(proj_factor=1.3, act_fn="gelu"),
-    ),
-    context_length=256,
-    num_blocks=7,
-    embedding_dim=128,
-    slstm_at=[1],
-
-)
-
-xlstm_stack = xLSTMBlockStack(cfg)
-
-x = torch.randn(4, 256, 128).to("cuda")
-xlstm_stack = xlstm_stack.to("cuda")
-y = xlstm_stack(x)
-y.shape == x.shape
-```
-
-If you are working with yaml strings / files for configuration you can also use dacite to create the config dataclasses. This is the same as the snippet above:
-
-```python
-from omegaconf import OmegaConf
-from dacite import from_dict
-from dacite import Config as DaciteConfig
-from xlstm import xLSTMBlockStack, xLSTMBlockStackConfig
-
-xlstm_cfg = """ 
-mlstm_block:
-  mlstm:
-    conv1d_kernel_size: 4
-    qkv_proj_blocksize: 4
-    num_heads: 4
-slstm_block:
-  slstm:
-    backend: cuda
-    num_heads: 4
-    conv1d_kernel_size: 4
-    bias_init: powerlaw_blockdependent
-  feedforward:
-    proj_factor: 1.3
-    act_fn: gelu
-context_length: 256
-num_blocks: 7
-embedding_dim: 128
-slstm_at: [1]
-"""
-cfg = OmegaConf.create(xlstm_cfg)
-cfg = from_dict(data_class=xLSTMBlockStackConfig, data=OmegaConf.to_container(cfg), config=DaciteConfig(strict=True))
-xlstm_stack = xLSTMBlockStack(cfg)
-
-x = torch.randn(4, 256, 128).to("cuda")
-xlstm_stack = xlstm_stack.to("cuda")
-y = xlstm_stack(x)
-y.shape == x.shape
-
-```
-
-
-### xLSTM Language Model
-
-The `xLSTMLMModel` is a wrapper around the `xLSTMBlockStack` that adds the token embedding and lm head.
-
-```python
-from omegaconf import OmegaConf
-from dacite import from_dict
-from dacite import Config as DaciteConfig
-from xlstm import xLSTMLMModel, xLSTMLMModelConfig
-
-xlstm_cfg = """ 
-vocab_size: 50304
-mlstm_block:
-  mlstm:
-    conv1d_kernel_size: 4
-    qkv_proj_blocksize: 4
-    num_heads: 4
-slstm_block:
-  slstm:
-    backend: cuda
-    num_heads: 4
-    conv1d_kernel_size: 4
-    bias_init: powerlaw_blockdependent
-  feedforward:
-    proj_factor: 1.3
-    act_fn: gelu
-context_length: 256
-num_blocks: 7
-embedding_dim: 128
-slstm_at: [1]
-"""
-cfg = OmegaConf.create(xlstm_cfg)
-cfg = from_dict(data_class=xLSTMLMModelConfig, data=OmegaConf.to_container(cfg), config=DaciteConfig(strict=True))
-xlstm_stack = xLSTMLMModel(cfg)
-
-x = torch.randint(0, 50304, size=(4, 256)).to("cuda")
-xlstm_stack = xlstm_stack.to("cuda")
-y = xlstm_stack(x)
-y.shape[1:] == (256, 50304)
-```
-
-
-## Experiments
-
-The synthetic experiments show-casing the benefits of sLSTM over mLSTM and vice versa best are the Parity task and the Multi-Query Associative Recall task. The Parity task can only be solved with state-tracking capabilities provided by the memory-mixing of sLSTM. The Multi-Query Associative Recall task measures memorization capabilities, where the matrix-memory and state expansion of mLSTM is very beneficial.
-In combination they do well on both tasks.
-
-To run each, run the `main.py` in the experiments folder like:
-```
-PYTHONPATH=. python experiments/main.py --config experiments/parity_xlstm01.yaml   # xLSTM[0:1], sLSTM only
-PYTHONPATH=. python experiments/main.py --config experiments/parity_xlstm10.yaml   # xLSTM[1:0], mLSTM only
-PYTHONPATH=. python experiments/main.py --config experiments/parity_xlstm11.yaml   # xLSTM[1:1], mLSTM and sLSTM
-```
-
-Note that the training loop does not contain early stopping or test evaluation.
-
-
-## Citation
-
-If you use this codebase, or otherwise find our work valuable, please cite the xLSTM paper:
-```
-@inproceedings{beck:24xlstm,
-  title = {xLSTM: Extended Long Short-Term Memory}, 
-  author = {Maximilian Beck and Korbinian Pöppel and Markus Spanring and Andreas Auer and Oleksandra Prudnikova and Michael Kopp and Günter Klambauer and Johannes Brandstetter and Sepp Hochreiter},
-  booktitle = {Thirty-eighth Conference on Neural Information Processing Systems},
-  year = {2024},
-  url = {https://arxiv.org/abs/2405.04517}, 
-}
-
-@article{beck:25xlstm7b,
-  title = {{xLSTM 7B}: A Recurrent LLM for Fast and Efficient Inference},
-  author = {Maximilian Beck and Korbinian Pöppel and Phillip Lippe and Richard Kurle and Patrick M. Blies and Günter Klambauer and Sebastian Böck and Sepp Hochreiter},
-  booktitle = {Forty-second International Conference on Machine Learning},
-  year = {2025},
-  url = {https://arxiv.org/abs/2503.13427}
-}
-
-```
+Apache-2.0
