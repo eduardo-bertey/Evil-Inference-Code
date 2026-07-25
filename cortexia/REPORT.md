@@ -115,16 +115,65 @@ T2/T3 tienen ~7% menos parámetros que T1 (no necesitan k_proj/v_proj en capas 2
 
 ---
 
+## Test2: MLA Basico vs MLA+BMA+Gated vs GQA Normal
+
+Segundo test (`cortexia/test_mem.py`) con3 variantes: GQA normal, MLA+BMA+Gated, y MLA basico (mismos K,V compartidos).
+
+### T3-basico: MLA Compartido (mismos K,V)
+
+**Arquitectura:** Capa 1 comprime → C_KV. TODAS las capas usan el **mismo W_up_kv** de layer 1 → mismos K,V. Solo Q es propio por capa.
+
+```
+Layer 1 (MLA):
+  C_KV = W_down(x)
+  K,V = W_up_kv_1(C_KV)
+  Q = q_proj_1(x)
+  attend(Q, K, V)
+
+Layer i (SharedKV):
+  K,V = W_up_kv_1(C_KV)        ← MISMO W_up_kv de layer 1
+  Q = q_proj_i(x)               ← Q propio
+  attend(Q, K, V)
+```
+
+### Resultados test_mem.py
+
+| Modelo | Params | Loss | Tiempo | K,V por capa |
+|---|---|---|---|---|
+| T1: GQA Normal | 2,186,657 | 0.1285 | 20.3s | Propios (k_proj, v_propios) |
+| T2: MLA+BMA+Gated | 2,051,065 | 0.1854 | 19.8s | Propios (W_up_kv propio) |
+| **T3: MLA Basico** | **1,994,657** | **0.0719** | **19.0s** | **Compartidos (mismo W_up_kv)** |
+
+### Analisis test_mem.py
+
+- **T3 gana** con loss=0.0719, el más bajo de todos
+- Tiene **menos params** (1.99M vs 2.19M de T1)
+- **Más rápido** (19.0s vs 20.3s)
+- Compartir K,V entre capas funciona mejor que dar pesos propios
+- Aprendizaje más rápido por menos parámetros (curva de loss más pronunciada)
+
+### Conclusión
+
+En datos pequeños, compartir K,V (T3-basico) supera a tener pesos propios (T2). La simplicity gana:
+- Menos parámetros = menos overfitting
+- Mismos K,V = gradients compartidos = aprendizaje más estable
+- BMA+Gated agregan complejidad sin beneficio claro en este escala
+
+**Nota:** Estos son datos minimos (1,167 chars). Con datasets más grandes, los pesos propios (T2) podrían superar al baseline compartido (T3-basico).
+
+---
+
 ## Técnicas Aplicadas
 
 ### 1. MLA (Multi-head Latent Attention)
 - Compresión: `C_KV = W_down(x)` — reduce dimensión de cache
 - Descompresión: `K,V = W_up_kv(C_KV)` — recuperar K,V
-- La capa 1 produce el latente, capas 2+ lo descomprimen con pesos propios
+- La capa 1 produce el latente, capas 2+ lo descomprimen
 
 ### 2. Cache Compartida entre Capas
 - Una sola cache C_KV para todas las capas
-- Cada capa tiene sus propios pesos W_up_kv → K,V diferentes del mismo latente
+- Variante A: cada capa tiene sus propios W_up_kv (T2)
+- Variante B: todas las capas comparten el mismo W_up_kv (T3-basico)
 - Reduce memoria de N caches a 1 cache
 
 ### 3. BMA (Bilinearly Modulated Attention)
@@ -155,4 +204,6 @@ Ubicación: `cortexia/transformers.py`
 - `CortexiaTransformer2` — MLA + BMA (1 capa MLA + 11 SharedCache)
 - `CortexiaTransformer3` — MLA + Gated (1 capa MLA + 11 SharedCache)
 
-Script de test: `cortexia/train_test.py`
+Scripts de test:
+- `cortexia/train_test.py` — train_test original (3 variantes)
+- `cortexia/test_mem.py` — test extendido (3 variantes: GQA, MLA+BMA+Gated, MLA basico)
