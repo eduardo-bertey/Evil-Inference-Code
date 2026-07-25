@@ -135,7 +135,7 @@ def main():
 
     # ── Attention: Sandwich MLA + BMA + Gated ───────────────────────────────
     print(f"  Attention: MLA+Gated({gated_type})+BMA (sandwich)")
-    print(f"  Dense only (no MoE) | {num_layers} capas")
+    print(f"  Dense only (no MoE) | {num_layers} capas | cache_every=4")
 
     # ── Tokenizer ──────────────────────────────────────────────────────────
     tokenizer = None
@@ -174,7 +174,7 @@ def main():
         mla_d_c=mla_d_c, mla_d_c1=mla_d_c1, mla_d_rotate=mla_d_rotate,
         use_moe=False,
         use_gated_attn=use_gated_attn, gated_type=gated_type,
-        use_bma=use_bma,
+        use_bma=use_bma, cache_every=4,
     ).to(device).to(dtype=dtype)
 
     # Weight decay groups

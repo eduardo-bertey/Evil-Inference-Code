@@ -89,6 +89,7 @@ class TransformerLM(nn.Module):
         use_gated_attn: bool = False,
         gated_type: str = "headwise",
         use_bma: bool = False,
+        cache_every: int = 1,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -165,7 +166,7 @@ class TransformerLM(nn.Module):
             mla_d_rotate=mla_d_rotate, mla_block_size=mla_block_size,
             use_gated_attn=use_gated_attn, gated_type=gated_type,
             use_xsa=use_xsa, qk_norm=qk_norm, use_sandwich_norm=use_sandwich_norm,
-            use_bma=use_bma,
+            use_bma=use_bma, cache_every=cache_every,
         )
         # Head anclado al embedding — no se puede desactivar
         self.head = TiedHead(self.embedding)
@@ -434,12 +435,13 @@ class TransformerLM(nn.Module):
         device = input_ids.device
         num_layers = self.num_layers
 
-        # Get head_dim from first layer
+        # Get config from transformer
         head_dim = self.transformer.layers[0].head_dim
         num_kv_groups = self.transformer.layers[0].num_kv_groups
 
-        # Initialize empty caches
-        caches = [None] * num_layers
+        # Initialize grouped caches
+        num_groups = len(self.transformer.cache_producer_indices)
+        caches = [None] * num_groups
         offset = 0
         generated = input_ids.clone()
 
