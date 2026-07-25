@@ -214,7 +214,7 @@ class SharedCacheLayer(nn.Module):
             scores = scores + mask
         h2 = (F.softmax(scores, -1) @ v).transpose(1,2).flatten(2)
         if self.use_gated:
-            gate = self.gate_proj(h).unsqueeze(-1).expand(-1, -1, self.head_dim)
+            gate = self.gate_proj(h).unsqueeze(-1).expand(-1, -1, -1, self.head_dim)
             h2 = h2 * torch.sigmoid(gate)
         x = x + self.o_proj(h2)
         x = x + self.ffn(self.norm2(x))
@@ -265,7 +265,7 @@ class SharedCacheLayer(nn.Module):
 
         # Gated: post-aggregation gating
         if self.use_gated:
-            gate = self.gate_proj(h).unsqueeze(-1).expand(-1, -1, self.head_dim)
+            gate = self.gate_proj(h).unsqueeze(-1).expand(-1, -1, -1, self.head_dim)
             h2 = h2 * torch.sigmoid(gate)
 
         x = x + self.o_proj(h2)
