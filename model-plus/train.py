@@ -173,11 +173,10 @@ def main():
 
     # ── BMA (Bilinearly Modulated Attention) ──────────────────────────────
     use_bma = False
-    if use_mla:
-        bma_input = input("BMA pre-aggregation gating (s=si, n=no): ").strip().lower()
-        use_bma = bma_input == "s"
-        if use_bma:
-            print("  BMA: enabled (pre-aggregation gating)")
+    bma_input = input("BMA pre-aggregation gating (s=si, n=no): ").strip().lower()
+    use_bma = bma_input == "s"
+    if use_bma:
+        print("  BMA: enabled (pre-aggregation gating)")
 
     # ── Tokenizer ──────────────────────────────────────────────────────────
     tokenizer = None
@@ -317,9 +316,12 @@ def main():
     elif use_gated_attn:
         qkn_tag = " + QK-Norm" if qk_norm else ""
         sn_tag = " + SandwichNorm" if use_sandwich_norm else ""
-        print(f"GatedAttention({gated_type}){qkn_tag}{sn_tag}: post-SDPA gating | cache: {gqa_cpt}B/tok")
+        bma_tag = " + BMA" if use_bma else ""
+        print(f"GatedAttention({gated_type}){bma_tag}{qkn_tag}{sn_tag}: post-SDPA gating | cache: {gqa_cpt}B/tok")
     else:
         cpt = gqa_cpt
+        if use_bma:
+            print(f"GQA + BMA: post-SDPA gating | cache: {gqa_cpt}B/tok")
     if use_moe:
         moe_layers = sum(1 for l in model.transformer.layers if l.use_moe)
         ntk_tag = " + NoisyTopK" if noise_std > 0 else ""

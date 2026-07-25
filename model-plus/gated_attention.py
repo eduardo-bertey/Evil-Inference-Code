@@ -46,6 +46,7 @@ class GatedAttention(nn.Module):
         attn_logit_cap: float | None = None,
         bias: bool = False,
         gated_type: str = "headwise",  # "headwise" | "elementwise"
+        use_bma: bool = False,
     ):
         super().__init__()
         self.num_heads = num_heads
@@ -54,6 +55,12 @@ class GatedAttention(nn.Module):
         self.causal = causal
         self.attn_logit_cap = attn_logit_cap
         self.gated_type = gated_type
+        self.use_bma = use_bma
+
+        # BMA filter
+        if use_bma:
+            from bma import BMAFilter
+            self.bma_filter = BMAFilter(num_heads, head_dim)
 
         self.inv_sqrt_head_dim = 1.0 / math.sqrt(head_dim)
 
@@ -117,6 +124,10 @@ class GatedAttention(nn.Module):
         k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
+        # BMA: pre-aggregation gating
+        if self.use_bma:
+            v = self.bma_filter(q, v)
+
         scores = torch.matmul(q, k.transpose(-2, -1)) * self.inv_sqrt_head_dim
 
         if self.attn_logit_cap is not None:
@@ -169,6 +180,10 @@ class GatedAttention(nn.Module):
         q = q.transpose(1, 2)
         k = k_expanded.transpose(1, 2)
         v = v_expanded.transpose(1, 2)
+
+        # BMA: pre-aggregation gating
+        if self.use_bma:
+            v = self.bma_filter(q, v)
 
         scores = torch.matmul(q, k.transpose(-2, -1)) * self.inv_sqrt_head_dim
 
@@ -228,6 +243,10 @@ class GatedAttention(nn.Module):
         q = q.transpose(1, 2)
         k = k_expanded.transpose(1, 2)
         v = v_expanded.transpose(1, 2)
+
+        # BMA: pre-aggregation gating
+        if self.use_bma:
+            v = self.bma_filter(q, v)
 
         scores = torch.matmul(q, k.transpose(-2, -1)) * self.inv_sqrt_head_dim
 

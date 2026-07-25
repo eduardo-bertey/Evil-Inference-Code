@@ -114,6 +114,7 @@ class LayerWithMoE(nn.Module):
                 d_c=mla_d_c, d_c1=mla_d_c1, d_rotate=mla_d_rotate,
                 block_size=mla_block_size,
                 use_xsa=use_xsa, qk_norm=qk_norm,
+                use_bma=use_bma,
             )
         elif use_gated_attn:
             self.attention = GatedAttention(
@@ -121,6 +122,7 @@ class LayerWithMoE(nn.Module):
                 head_dim=head_dim, max_seq_len=max_seq_len, rope_base=rope_base,
                 rope_scaling=rope_scaling, causal=causal, dropout=attn_dropout,
                 attn_logit_cap=attn_logit_cap, bias=bias, gated_type=gated_type,
+                use_bma=use_bma,
             )
         else:
             self.attention = Attention(

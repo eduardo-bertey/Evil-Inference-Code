@@ -82,7 +82,7 @@ class MultiHeadLatentAttentionGQA(nn.Module):
                  max_seq_len=2048, rope_base=10000.0, rope_scaling=1.0,
                  causal=True, dropout=0.0, attn_logit_cap=None, bias=False,
                  d_c=None, d_c1=None, d_rotate=None, block_size=128,
-                 use_xsa=False, qk_norm=True):
+                 use_xsa=False, qk_norm=True, use_bma=False):
         super().__init__()
         if num_kv_groups == 0: num_kv_groups = num_heads
         if head_dim is None: head_dim = d_model // num_heads
@@ -99,9 +99,15 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         self.block_size = block_size
         self.use_xsa = use_xsa
         self.qk_norm = qk_norm
+        self.use_bma = use_bma
         if qk_norm:
             self.q_norm = RMSNorm(head_dim)
             self.k_norm = RMSNorm(head_dim)
+
+        # BMA filter
+        if use_bma:
+            from bma import BMAFilter
+            self.bma_filter = BMAFilter(num_heads, head_dim)
 
         self.qkv = QKVProjectionMLA(d_model, num_heads, num_kv_groups, head_dim,
                                      d_c, d_c1, d_rotate, bias)
@@ -180,6 +186,11 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V, self.num_heads, self.num_kv_groups).transpose(1, 2)
+
+        # BMA: pre-aggregation gating
+        if self.use_bma:
+            v = self.bma_filter(Q_state.transpose(1, 2), v)
+
         attn_out = torch.matmul(attn_w, v)  # (B, nh, T, hd)
         if self.use_xsa:
             Vn = F.normalize(v, dim=-1)
@@ -195,6 +206,11 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
+
+        # BMA: pre-aggregation gating
+        if self.use_bma:
+            v = self.bma_filter(Q_state.transpose(1, 2), v)
+
         attn_out = torch.matmul(attn_w, v)  # (B, nh, T, hd)
         if self.use_xsa:
             v_new = v[:, :, -q_len:, :]
