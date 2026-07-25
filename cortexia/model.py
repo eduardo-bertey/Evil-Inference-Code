@@ -20,7 +20,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from block import Transformer
-from moe_block import MoETransformer
 from cache_kv import KVCache
 from attention import repeat_kv
 from rope import apply_rope_partial
@@ -103,44 +102,7 @@ class TransformerLM(nn.Module):
         # Depth-scaled init on embedding
         nn.init.normal_(self.embedding.weight, mean=0, std=0.02)
 
-        if use_moe:
-            self.transformer = MoETransformer(
-                num_layers=num_layers,
-                d_model=d_model,
-                num_heads=num_heads,
-                num_kv_groups=num_kv_groups,
-                head_dim=head_dim,
-                ffn_expansion=ffn_expansion,
-                use_swiglu=use_swiglu,
-                max_seq_len=max_seq_len,
-                rope_base=rope_base,
-                rope_scaling=rope_scaling,
-                causal=causal,
-                attn_dropout=attn_dropout,
-                ffn_dropout=ffn_dropout,
-                residual_dropout=residual_dropout,
-                attn_logit_cap=attn_logit_cap,
-                bias=bias,
-                norm_eps=norm_eps,
-                ffn_round_to=ffn_round_to,
-                use_mla=use_mla,
-                use_xsa=use_xsa,
-                qk_norm=qk_norm,
-                use_sandwich_norm=use_sandwich_norm,
-                mla_d_c=mla_d_c, mla_d_c1=mla_d_c1,
-                mla_d_rotate=mla_d_rotate, mla_block_size=mla_block_size,
-                use_moe=use_moe,
-                n_experts=n_experts, top_k=top_k, n_shared=n_shared,
-                expert_dim=expert_dim,
-                capacity_factor=capacity_factor,
-                z_loss_gamma=z_loss_gamma, bias_decay=bias_decay,
-                noise_std=noise_std,
-                n_dense_start=n_dense_start, n_dense_end=n_dense_end,
-                use_gated_attn=use_gated_attn, gated_type=gated_type,
-                use_bma=use_bma,
-            )
-        else:
-            self.transformer = Transformer(
+        self.transformer = Transformer(
             num_layers=num_layers,
             d_model=d_model,
             num_heads=num_heads,
