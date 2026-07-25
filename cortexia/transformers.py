@@ -237,9 +237,10 @@ class SharedCacheLayer(nn.Module):
         q, k_local = self.rope(q, k_local, offset)
 
         if shared_cache is not None:
-            # Cache de layer 1 ya tiene RoPE aplicado
-            k_cached = self.k_reproj(shared_cache[0])
-            v_cached = self.v_reproj(shared_cache[1])
+            # Cache de layer 1 ya tiene RoPE — reshape, reproject, reshape back
+            Bc, Sc, nkv, hd = shared_cache[0].shape
+            k_cached = self.k_reproj(shared_cache[0].reshape(Bc, Sc, nkv * hd)).reshape(Bc, Sc, nkv, hd)
+            v_cached = self.v_reproj(shared_cache[1].reshape(Bc, Sc, nkv * hd)).reshape(Bc, Sc, nkv, hd)
         else:
             k_cached, v_cached = k_local, v_local
 
