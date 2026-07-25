@@ -312,7 +312,8 @@ def main():
         qkn_tag = " + QK-Norm" if qk_norm else ""
         sn_tag = " + SandwichNorm" if use_sandwich_norm else ""
         gated_tag = f" + Gated({gated_type})" if use_gated_attn else ""
-        print(f"MLA{gated_tag}{xsa_tag}{qkn_tag}{sn_tag}: d_c={d_c_real} d_c1={d_c1_real} d_rot={d_rot_real} | cache: {gqa_cpt}→{cpt}B/tok ({pct:.0f}%)")
+        bma_tag = " + BMA" if use_bma else ""
+        print(f"MLA{gated_tag}{bma_tag}{xsa_tag}{qkn_tag}{sn_tag}: d_c={d_c_real} d_c1={d_c1_real} d_rot={d_rot_real} | cache: {gqa_cpt}→{cpt}B/tok ({pct:.0f}%)")
     elif use_gated_attn:
         qkn_tag = " + QK-Norm" if qk_norm else ""
         sn_tag = " + SandwichNorm" if use_sandwich_norm else ""
