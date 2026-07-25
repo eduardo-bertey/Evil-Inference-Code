@@ -212,10 +212,11 @@ class SharedCacheLayer(nn.Module):
         if S > 1:
             mask = torch.triu(torch.full((S, S), float("-inf"), device=x.device), diagonal=1)
             scores = scores + mask
-        h2 = (F.softmax(scores, -1) @ v).transpose(1,2).flatten(2)
+        h2_4d = (F.softmax(scores, -1) @ v)  # (B, H, S, D)
         if self.use_gated:
             gate = self.gate_proj(h).unsqueeze(-1).expand(-1, -1, -1, self.head_dim)
-            h2 = h2 * torch.sigmoid(gate)
+            h2_4d = h2_4d * torch.sigmoid(gate)
+        h2 = h2_4d.transpose(1,2).flatten(2)
         x = x + self.o_proj(h2)
         x = x + self.ffn(self.norm2(x))
         return x
@@ -261,12 +262,14 @@ class SharedCacheLayer(nn.Module):
             mask = torch.triu(torch.full((S_new, kv_len), float("-inf"), device=x.device), diagonal=kv_len - S_new + 1)
             scores = scores + mask
 
-        h2 = (F.softmax(scores, -1) @ v_exp).transpose(1,2).flatten(2)
+        h2_4d = F.softmax(scores, -1) @ v_exp  # (B, H, S, D)
 
         # Gated: post-aggregation gating
         if self.use_gated:
             gate = self.gate_proj(h).unsqueeze(-1).expand(-1, -1, -1, self.head_dim)
-            h2 = h2 * torch.sigmoid(gate)
+            h2_4d = h2_4d * torch.sigmoid(gate)
+
+        h2 = h2_4d.transpose(1,2).flatten(2)
 
         x = x + self.o_proj(h2)
         x = x + self.ffn(self.norm2(x))
