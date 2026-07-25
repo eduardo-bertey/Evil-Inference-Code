@@ -383,12 +383,12 @@ class SharedCacheTransformerLayer(nn.Module):
 
         # Gated: post-aggregation gating
         if self.use_gated_attn:
-            gate_raw = self.gate_proj(Q.transpose(1, 2).reshape(B, T, -1))
+            # Q is (B, num_heads, T, head_dim) — same layout as attn_out (B, H, T, D)
+            gate_raw = self.gate_proj(Q.transpose(1, 2).reshape(B, T, -1))  # (B, T, H) or (B, T, H*D)
             if self.gated_type == "headwise":
-                gate = gate_raw.reshape(B, T, self.num_heads, 1)
+                gate = gate_raw.permute(0, 2, 1).unsqueeze(-1)  # (B, H, T, 1)
             else:
-                gate = gate_raw.reshape(B, T, self.num_heads, self.head_dim)
-            gate = gate.expand(-1, -1, -1, self.head_dim)
+                gate = gate_raw.reshape(B, T, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # (B, H, T, D)
             attn_out = attn_out * torch.sigmoid(gate)
 
         attn_out = attn_out.transpose(1, 2)
@@ -463,10 +463,9 @@ class SharedCacheTransformerLayer(nn.Module):
         if self.use_gated_attn:
             gate_raw = self.gate_proj(Q.transpose(1, 2).reshape(B, S_new, -1))
             if self.gated_type == "headwise":
-                gate = gate_raw.reshape(B, S_new, self.num_heads, 1)
+                gate = gate_raw.permute(0, 2, 1).unsqueeze(-1)  # (B, H, T, 1)
             else:
-                gate = gate_raw.reshape(B, S_new, self.num_heads, self.head_dim)
-            gate = gate.expand(-1, -1, -1, self.head_dim)
+                gate = gate_raw.reshape(B, S_new, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # (B, H, T, D)
             attn_out = attn_out * torch.sigmoid(gate)
 
         attn_out = attn_out.transpose(1, 2)
