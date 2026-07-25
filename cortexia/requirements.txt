@@ -1,0 +1,7 @@
+# Cortexia dependencies
+torch
+datasets
+huggingface_hub
+tokenizers
+matplotlib
+safetensors
