@@ -207,7 +207,7 @@ class TransformerLayer(nn.Module):
             down = self.attention.qkv.W_down(h)
             C_KV = down[:, :, self.attention.qkv.d_c1:self.attention.qkv.d_c1 + self.attention.qkv.d_c]
             C_KV = self.attention.qkv.norm_ckv(C_KV)
-            K_rotate_raw = down[:, :, self.attention.qkv.d_c1 + self.attention.qkv.d_c:]
+            K_rotate_raw = down[:, :, self.attention.qkv.d_c1 + self.attention.qkv.d_c:].unsqueeze(2)
         else:
             C_KV = None
             K_rotate_raw = None
@@ -394,8 +394,7 @@ class SharedCacheTransformerLayer(nn.Module):
         K_rotate_raw = cache[1] if isinstance(cache, tuple) and len(cache) > 1 else torch.zeros(B, T, 1, self.d_rotate, device=x.device)
 
         # RoPE solo en dimensiones de rotacion
-        Q_rotate, K_rotate = self.rope(Q_rotate_raw, K_rotate_raw.squeeze(2), offset)
-        K_rotate = K_rotate.unsqueeze(2)  # back to (B, T, 1, d_rotate)
+        Q_rotate, K_rotate = self.rope(Q_rotate_raw, K_rotate_raw, offset)
 
         if self.qk_norm:
             Q_state = self.q_norm(Q_state)
@@ -451,15 +450,15 @@ class SharedCacheTransformerLayer(nn.Module):
             K_state, V = kv_up.chunk(2, dim=-1)
             K_state = K_state.reshape(B, T, self.num_kv_groups, self.head_dim)
             V = V.reshape(B, T, self.num_kv_groups, self.head_dim)
-            # RoPE: Q_rotate with offset, K_rotate from cache with offset=0 (ya tiene posicion)
-            Q_rotate, K_rotate = self.rope(Q_rotate_raw, K_rotate_raw_full.squeeze(2), offset)
-            K_rotate = K_rotate.unsqueeze(2)
+            # RoPE: Q_rotate with offset, K_rotate from cache with offset=0 (raw, no RoPE yet)
+            Q_rotate = self.rope.apply_to_single(Q_rotate_raw, offset=offset)
+            K_rotate = self.rope.apply_to_single(K_rotate_raw_full, offset=0)
         else:
             T = 0
             K_state = torch.zeros(B, 0, self.num_kv_groups, self.head_dim, device=x.device)
             V = torch.zeros(B, 0, self.num_kv_groups, self.head_dim, device=x.device)
             K_rotate = torch.zeros(B, 0, 1, self.d_rotate, device=x.device)
-            Q_rotate, _ = self.rope(Q_rotate_raw, torch.zeros(B, S_new, self.d_rotate, device=x.device), offset)
+            Q_rotate = self.rope.apply_to_single(Q_rotate_raw, offset=offset)
 
         if self.qk_norm:
             Q_state = self.q_norm(Q_state)
