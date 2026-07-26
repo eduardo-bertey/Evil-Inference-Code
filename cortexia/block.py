@@ -665,11 +665,8 @@ class Transformer(nn.Module):
                 if new_cache is not None:
                     new_caches[group_idx] = new_cache
             else:
-                # Shared cache layer: lee C_KV del cache de su grupo
+                # Shared cache layer: lee (C_KV, K_rotate_raw) del cache de su grupo
                 group_idx = self._get_group_idx(i)
-                cache = new_caches[group_idx]
-                # Extract C_KV only from full cache tuple
-                c_kv = cache[0] if isinstance(cache, tuple) else cache
-                x = layer.forward_with_cache(x, offset, c_kv)
+                x = layer.forward_with_cache(x, offset, new_caches[group_idx])
 
         return self.final_norm(x), new_caches
