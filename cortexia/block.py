@@ -392,6 +392,8 @@ class SharedCacheTransformerLayer(nn.Module):
 
         # K_rotate_raw del cache (posicion, no content)
         K_rotate_raw = cache[1] if isinstance(cache, tuple) and len(cache) > 1 else torch.zeros(B, T, 1, self.d_rotate, device=x.device)
+        if K_rotate_raw.dim() == 3:
+            K_rotate_raw = K_rotate_raw.unsqueeze(2)
 
         # RoPE solo en dimensiones de rotacion
         Q_rotate, K_rotate = self.rope(Q_rotate_raw, K_rotate_raw, offset)
@@ -445,12 +447,15 @@ class SharedCacheTransformerLayer(nn.Module):
 
         if cache is not None:
             C_KV_full, K_rotate_raw_full = cache
+            # Ensure K_rotate_raw is 4D: (B, T, 1, d_rotate)
+            if K_rotate_raw_full.dim() == 3:
+                K_rotate_raw_full = K_rotate_raw_full.unsqueeze(2)
             T = C_KV_full.shape[1]
             kv_up = self.W_up_kv(C_KV_full)
             K_state, V = kv_up.chunk(2, dim=-1)
             K_state = K_state.reshape(B, T, self.num_kv_groups, self.head_dim)
             V = V.reshape(B, T, self.num_kv_groups, self.head_dim)
-            # RoPE: Q_rotate with offset, K_rotate from cache with offset=0 (raw, no RoPE yet)
+            # RoPE: Q_rotate with offset, K_rotate from cache with offset=0
             Q_rotate = self.rope.apply_to_single(Q_rotate_raw, offset=offset)
             K_rotate = self.rope.apply_to_single(K_rotate_raw_full, offset=0)
         else:
