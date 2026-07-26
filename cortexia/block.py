@@ -202,13 +202,15 @@ class TransformerLayer(nn.Module):
         residual = x
         h = self.attn_norm(x)
 
-        # Extract C_KV BEFORE attention (same h that MLA qkv receives)
+        # Extract C_KV + K_rotate_raw BEFORE attention (same h that MLA qkv receives)
         if self.use_mla and hasattr(self.attention, 'qkv'):
             down = self.attention.qkv.W_down(h)
             C_KV = down[:, :, self.attention.qkv.d_c1:self.attention.qkv.d_c1 + self.attention.qkv.d_c]
             C_KV = self.attention.qkv.norm_ckv(C_KV)
+            K_rotate_raw = down[:, :, self.attention.qkv.d_c1 + self.attention.qkv.d_c:]
         else:
             C_KV = None
+            K_rotate_raw = None
 
         h_attn = self.attention(h, offset)
         h_attn = self.residual_dropout(h_attn)
@@ -218,7 +220,7 @@ class TransformerLayer(nn.Module):
         h = self.ffn_norm(x)
         h = self.ffn(h)
         h = self.residual_dropout(h)
-        return residual + h, C_KV
+        return residual + h, C_KV, K_rotate_raw
 
     def forward_with_cache(
         self,
@@ -241,13 +243,13 @@ class TransformerLayer(nn.Module):
 
 
 class SharedCacheTransformerLayer(nn.Module):
-    """Capa que lee C_KV de una cache compartida (producida por MLA layer).
+    """Capa que lee C_KV + K_rotate_raw de una cache compartida (MLA layer).
 
-    - Q viene de x via q_proj propio (sin compresion latent)
-    - K,V se descomprimen de C_KV via W_up_kv propio (pesos diferentes por capa)
-    - RoPE se aplica a K desde el cache raw
-    - Compatible con MLA cache: C_KV
-    - Soporta BMA (pre-aggregation) y Gated (post-aggregation)
+    Mismo scoring decoupled que MLA:
+      - Q = Q_state + Q_rotate (desde x via q_proj propio)
+      - K,V = descomprimidos de C_KV via W_up_kv propio
+      - RoPE solo en Q_rotate y K_rotate_raw (del cache)
+      - score = Q_state·K_state/sqrt(d_c) + Q_rotate·K_rotate/sqrt(d_rotate)
     """
 
     def __init__(
@@ -257,6 +259,7 @@ class SharedCacheTransformerLayer(nn.Module):
         num_kv_groups: int,
         head_dim: int,
         d_c: int,
+        d_rotate: int,
         max_seq_len: int = 2048,
         rope_base: float = 10000.0,
         rope_scaling: float = 1.0,
@@ -279,6 +282,7 @@ class SharedCacheTransformerLayer(nn.Module):
         self.num_kv_groups = num_kv_groups
         self.head_dim = head_dim
         self.d_c = d_c
+        self.d_rotate = d_rotate
         self.causal = causal
         self.attn_logit_cap = attn_logit_cap
         self.qk_norm = qk_norm
@@ -286,14 +290,14 @@ class SharedCacheTransformerLayer(nn.Module):
         self.use_gated_attn = use_gated_attn
         self.gated_type = gated_type
 
-        # Q projection: directo desde x
-        self.q_proj = nn.Linear(d_model, num_heads * head_dim, bias=bias)
+        # Q projection: x -> Q_state + Q_rotate (decoupled, igual que MLA)
+        self.q_proj = nn.Linear(d_model, num_heads * head_dim + num_heads * d_rotate, bias=bias)
 
-        # K,V decompression: C_KV -> K, V (SUS pesos, diferentes a MLA layer)
+        # K,V decompression: C_KV -> K_state, V (SUS pesos, diferentes a MLA layer)
         self.W_up_kv = nn.Linear(d_c, 2 * num_kv_groups * head_dim, bias=bias)
 
-        # RoPE para Q y K
-        self.rope = RoPE(head_dim=head_dim, max_seq_len=max_seq_len, base=rope_base, scaling_factor=rope_scaling)
+        # RoPE solo para dimensiones de rotacion
+        self.rope = RoPE(head_dim=d_rotate, max_seq_len=max_seq_len, base=rope_base, scaling_factor=rope_scaling)
 
         # QK-Norm
         if qk_norm:
@@ -331,64 +335,91 @@ class SharedCacheTransformerLayer(nn.Module):
             mask = torch.triu(torch.full((max_seq_len, max_seq_len), float("-inf")), diagonal=1)
             self.register_buffer("causal_mask", mask, persistent=False)
 
-    def forward(self, x: torch.Tensor, C_KV: torch.Tensor, offset: int = 0) -> torch.Tensor:
-        """Training: lee C_KV de cache compartida, descomprime con sus pesos."""
-        B, T, _ = x.shape
-        h = self.attn_norm(x)
+    def _decoupled_scores(self, Q_state, Q_rotate, K_state, K_rotate, seq_len, kv_len=None, causal_mask=None):
+        """Decoupled content + RoPE scoring, igual que MLA."""
+        nh, nkv, hd, dr = self.num_heads, self.num_kv_groups, self.head_dim, self.d_rotate
+        scale_c = 1.0 / math.sqrt(self.d_c) if self.qk_norm else 1.0 / math.sqrt(hd)
+        scale_r = 1.0 if self.qk_norm else 1.0 / math.sqrt(dr)
 
-        # Q directo desde x
-        Q = self.q_proj(h).reshape(B, T, self.num_heads, self.head_dim)
+        k_c = repeat_kv(K_state, nh, nkv).transpose(1, 2)
+        q_c = Q_state.transpose(1, 2)
+        s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) * scale_c
 
-        # K,V desde cache compartida via SUS pesos
-        kv_up = self.W_up_kv(C_KV)
-        K, V = kv_up.chunk(2, dim=-1)
-        K = K.reshape(B, T, self.num_kv_groups, self.head_dim)
-        V = V.reshape(B, T, self.num_kv_groups, self.head_dim)
+        q_r = Q_rotate.transpose(1, 2)
+        k_r = K_rotate.transpose(1, 2).expand(-1, nh, -1, -1)
+        s_r = torch.matmul(q_r, k_r.transpose(-2, -1)) * scale_r
 
-        # RoPE para Q y K
-        Q, K = self.rope(Q, K, offset)
-
-        if self.qk_norm:
-            Q = self.q_norm(Q)
-            K = self.k_norm(K)
-
-        # GQA expand
-        n = self.num_heads // self.num_kv_groups
-        K_exp = K.repeat_interleave(n, 2)
-        V_exp = V.repeat_interleave(n, 2)
-
-        Q, K_exp, V_exp = [t.transpose(1, 2) for t in (Q, K_exp, V_exp)]
-
-        # BMA: pre-aggregation gating
-        if self.use_bma:
-            V_exp = self.bma_filter(Q, V_exp)
-
-        # Attention scores
-        scale = 1.0 / math.sqrt(self.head_dim)
-        scores = torch.matmul(Q, K_exp.transpose(-2, -1)) * scale
-
+        scores = s_c + s_r
         if self.attn_logit_cap is not None:
             scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
 
-        if self.causal:
-            if T <= self.causal_mask.shape[0]:
-                scores = scores + self.causal_mask[:T, :T]
-            else:
-                mask = torch.triu(torch.full((T, T), float("-inf"), device=scores.device), diagonal=1)
-                scores = scores + mask
+        is_causal = self.causal if causal_mask is None else causal_mask
+        if is_causal:
+            if kv_len is None:
+                kv_len = K_state.shape[1]
+            if seq_len > 1:
+                if seq_len == kv_len:
+                    if seq_len <= self.causal_mask.shape[0]:
+                        scores = scores + self.causal_mask[:seq_len, :seq_len]
+                    else:
+                        mask = torch.triu(torch.full((seq_len, seq_len), float("-inf"), device=scores.device), diagonal=1)
+                        scores = scores + mask
+                else:
+                    mask = torch.triu(
+                        torch.full((seq_len, kv_len), float("-inf"), device=scores.device),
+                        diagonal=kv_len - seq_len + 1
+                    )
+                    scores = scores + mask
+        return scores
 
+    def forward(self, x: torch.Tensor, cache: tuple, offset: int = 0) -> torch.Tensor:
+        """Training: lee (C_KV, K_rotate_raw) de cache compartida."""
+        B, T, _ = x.shape
+        h = self.attn_norm(x)
+
+        # Q_state + Q_rotate desde x (decoupled, igual que MLA)
+        q_raw = self.q_proj(h)
+        Q_state, Q_rotate_raw = q_raw.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
+        Q_state = Q_state.reshape(B, T, self.num_heads, self.head_dim)
+        Q_rotate_raw = Q_rotate_raw.reshape(B, T, self.num_heads, self.d_rotate)
+
+        # K_state, V desde cache via SUS pesos
+        C_KV = cache[0] if isinstance(cache, tuple) else cache
+        kv_up = self.W_up_kv(C_KV)
+        K_state, V = kv_up.chunk(2, dim=-1)
+        K_state = K_state.reshape(B, T, self.num_kv_groups, self.head_dim)
+        V = V.reshape(B, T, self.num_kv_groups, self.head_dim)
+
+        # K_rotate_raw del cache (posicion, no content)
+        K_rotate_raw = cache[1] if isinstance(cache, tuple) and len(cache) > 1 else torch.zeros(B, T, 1, self.d_rotate, device=x.device)
+
+        # RoPE solo en dimensiones de rotacion
+        Q_rotate, K_rotate = self.rope(Q_rotate_raw, K_rotate_raw.squeeze(2), offset)
+        K_rotate = K_rotate.unsqueeze(2)  # back to (B, T, 1, d_rotate)
+
+        if self.qk_norm:
+            Q_state = self.q_norm(Q_state)
+            K_state = self.k_norm(K_state)
+
+        scores = self._decoupled_scores(Q_state, Q_rotate, K_state, K_rotate, T)
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
+
+        n = self.num_heads // self.num_kv_groups
+        V_exp = V.repeat_interleave(n, 2).transpose(1, 2)
+
+        if self.use_bma:
+            V_exp = self.bma_filter(Q_state.transpose(1, 2), V_exp)
+
         attn_out = torch.matmul(attn_w, V_exp)
 
         # Gated: post-aggregation gating
         if self.use_gated_attn:
-            # Q is (B, num_heads, T, head_dim) — same layout as attn_out (B, H, T, D)
-            gate_raw = self.gate_proj(Q.transpose(1, 2).reshape(B, T, -1))  # (B, T, H) or (B, T, H*D)
+            gate_raw = self.gate_proj(Q_state.transpose(1, 2).reshape(B, T, -1))
             if self.gated_type == "headwise":
                 gate = gate_raw.permute(0, 2, 1).unsqueeze(-1)  # (B, H, T, 1)
             else:
-                gate = gate_raw.reshape(B, T, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # (B, H, T, D)
+                gate = gate_raw.reshape(B, T, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
             attn_out = attn_out * torch.sigmoid(gate)
 
         attn_out = attn_out.transpose(1, 2)
@@ -402,70 +433,57 @@ class SharedCacheTransformerLayer(nn.Module):
         x = residual + h
         return x
 
-    def forward_with_cache(self, x: torch.Tensor, offset: int, C_KV: torch.Tensor) -> torch.Tensor:
-        """Inference: lee C_KV completo de cache compartida."""
+    def forward_with_cache(self, x: torch.Tensor, offset: int, cache: tuple) -> torch.Tensor:
+        """Inference: lee (C_KV_full, K_rotate_raw_full) de cache compartida."""
         B, S_new, _ = x.shape
         h = self.attn_norm(x)
 
-        Q = self.q_proj(h).reshape(B, S_new, self.num_heads, self.head_dim)
+        # Q_state + Q_rotate desde x
+        q_raw = self.q_proj(h)
+        Q_state, Q_rotate_raw = q_raw.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
+        Q_state = Q_state.reshape(B, S_new, self.num_heads, self.head_dim)
+        Q_rotate_raw = Q_rotate_raw.reshape(B, S_new, self.num_heads, self.d_rotate)
 
-        if C_KV is not None and C_KV.shape[1] > 0:
-            T = C_KV.shape[1]
-            kv_up = self.W_up_kv(C_KV)
-            K, V = kv_up.chunk(2, dim=-1)
-            K = K.reshape(B, T, self.num_kv_groups, self.head_dim)
+        if cache is not None:
+            C_KV_full, K_rotate_raw_full = cache
+            T = C_KV_full.shape[1]
+            kv_up = self.W_up_kv(C_KV_full)
+            K_state, V = kv_up.chunk(2, dim=-1)
+            K_state = K_state.reshape(B, T, self.num_kv_groups, self.head_dim)
             V = V.reshape(B, T, self.num_kv_groups, self.head_dim)
-            Q, K = self.rope(Q, K, offset)
+            # RoPE: Q_rotate with offset, K_rotate from cache with offset=0 (ya tiene posicion)
+            Q_rotate, K_rotate = self.rope(Q_rotate_raw, K_rotate_raw_full.squeeze(2), offset)
+            K_rotate = K_rotate.unsqueeze(2)
         else:
             T = 0
-            K = torch.zeros(B, 0, self.num_kv_groups, self.head_dim, device=x.device)
+            K_state = torch.zeros(B, 0, self.num_kv_groups, self.head_dim, device=x.device)
             V = torch.zeros(B, 0, self.num_kv_groups, self.head_dim, device=x.device)
+            K_rotate = torch.zeros(B, 0, 1, self.d_rotate, device=x.device)
+            Q_rotate, _ = self.rope(Q_rotate_raw, torch.zeros(B, S_new, self.d_rotate, device=x.device), offset)
 
         if self.qk_norm:
-            Q = self.q_norm(Q)
+            Q_state = self.q_norm(Q_state)
             if T > 0:
-                K = self.k_norm(K)
+                K_state = self.k_norm(K_state)
 
-        n = self.num_heads // self.num_kv_groups
-        K_exp = K.repeat_interleave(n, 2)
-        V_exp = V.repeat_interleave(n, 2)
-
-        Q, K_exp, V_exp = [t.transpose(1, 2) for t in (Q, K_exp, V_exp)]
-
-        if self.use_bma:
-            V_exp = self.bma_filter(Q, V_exp)
-
-        scale = 1.0 / math.sqrt(self.head_dim)
-        scores = torch.matmul(Q, K_exp.transpose(-2, -1)) * scale
-
-        if self.attn_logit_cap is not None:
-            scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
-
-        if self.causal and S_new > 1:
-            kv_len = K_exp.shape[2]
-            if S_new == kv_len:
-                if S_new <= self.causal_mask.shape[0]:
-                    scores = scores + self.causal_mask[:S_new, :S_new]
-                else:
-                    mask = torch.triu(torch.full((S_new, S_new), float("-inf"), device=scores.device), diagonal=1)
-                    scores = scores + mask
-            else:
-                mask = torch.triu(
-                    torch.full((S_new, kv_len), float("-inf"), device=scores.device),
-                    diagonal=kv_len - S_new + 1
-                )
-                scores = scores + mask
-
+        scores = self._decoupled_scores(Q_state, Q_rotate, K_state, K_rotate, S_new, T, S_new > 1)
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
+
+        n = self.num_heads // self.num_kv_groups
+        V_exp = V.repeat_interleave(n, 2).transpose(1, 2)
+
+        if self.use_bma:
+            V_exp = self.bma_filter(Q_state.transpose(1, 2), V_exp)
+
         attn_out = torch.matmul(attn_w, V_exp)
 
         if self.use_gated_attn:
-            gate_raw = self.gate_proj(Q.transpose(1, 2).reshape(B, S_new, -1))
+            gate_raw = self.gate_proj(Q_state.transpose(1, 2).reshape(B, S_new, -1))
             if self.gated_type == "headwise":
-                gate = gate_raw.permute(0, 2, 1).unsqueeze(-1)  # (B, H, T, 1)
+                gate = gate_raw.permute(0, 2, 1).unsqueeze(-1)
             else:
-                gate = gate_raw.reshape(B, S_new, self.num_heads, self.head_dim).permute(0, 2, 1, 3)  # (B, H, T, D)
+                gate = gate_raw.reshape(B, S_new, self.num_heads, self.head_dim).permute(0, 2, 1, 3)
             attn_out = attn_out * torch.sigmoid(gate)
 
         attn_out = attn_out.transpose(1, 2)
@@ -567,7 +585,7 @@ class Transformer(nn.Module):
                 # Shared cache layer: lee C_KV de cache compartida
                 layer = SharedCacheTransformerLayer(
                     d_model=d_model, num_heads=num_heads, num_kv_groups=num_kv_groups,
-                    head_dim=head_dim, d_c=mla_d_c,
+                    head_dim=head_dim, d_c=mla_d_c, d_rotate=mla_d_rotate,
                     max_seq_len=max_seq_len, rope_base=rope_base, rope_scaling=rope_scaling,
                     causal=causal, dropout=attn_dropout, attn_logit_cap=attn_logit_cap,
                     bias=bias, norm_eps=norm_eps, ffn_expansion=ffn_expansion,
@@ -596,16 +614,21 @@ class Transformer(nn.Module):
 
         for i, layer in enumerate(self.layers):
             if self.is_cache_producer[i]:
-                # MLA layer: produce C_KV
-                x, C_KV = layer.forward_produce_cache(x, offset)
+                # MLA layer: produce (C_KV, K_rotate_raw)
+                x, C_KV, K_rotate_raw = layer.forward_produce_cache(x, offset)
                 if C_KV is not None:
                     group_idx = self.cache_producer_indices.index(i)
+                    cache_entry = (C_KV, K_rotate_raw)
                     if shared_caches[group_idx] is None:
-                        shared_caches[group_idx] = C_KV
+                        shared_caches[group_idx] = cache_entry
                     else:
-                        shared_caches[group_idx] = torch.cat([shared_caches[group_idx], C_KV], 1)
+                        old_C_KV, old_K_rot = shared_caches[group_idx]
+                        shared_caches[group_idx] = (
+                            torch.cat([old_C_KV, C_KV], 1),
+                            torch.cat([old_K_rot, K_rotate_raw], 1),
+                        )
             else:
-                # Shared cache layer: lee C_KV de cache correspondiente
+                # Shared cache layer: lee (C_KV, K_rotate_raw) de cache
                 group_idx = self._get_group_idx(i)
                 x = layer(x, shared_caches[group_idx], offset)
 
