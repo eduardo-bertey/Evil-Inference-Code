@@ -622,15 +622,7 @@ class Transformer(nn.Module):
                 x, C_KV, K_rotate_raw = layer.forward_produce_cache(x, offset)
                 if C_KV is not None:
                     group_idx = self.cache_producer_indices.index(i)
-                    cache_entry = (C_KV, K_rotate_raw)
-                    if shared_caches[group_idx] is None:
-                        shared_caches[group_idx] = cache_entry
-                    else:
-                        old_C_KV, old_K_rot = shared_caches[group_idx]
-                        shared_caches[group_idx] = (
-                            torch.cat([old_C_KV, C_KV], 1),
-                            torch.cat([old_K_rot, K_rotate_raw], 1),
-                        )
+                    shared_caches[group_idx] = (C_KV, K_rotate_raw)
             else:
                 # Shared cache layer: lee (C_KV, K_rotate_raw) de cache
                 group_idx = self._get_group_idx(i)
