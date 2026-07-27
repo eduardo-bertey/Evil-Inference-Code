@@ -565,7 +565,6 @@ class MLAGatedAttention(nn.Module):
             v = self.bma_filter(Q_state.transpose(1, 2), v)
 
         attn_out = torch.matmul(attn_w, v)
-
         if self.use_xsa:
             v_new = v[:, :, -S_new:, :]
             Vn = F.normalize(v_new, dim=-1)
