@@ -430,7 +430,7 @@ class MLAGatedAttention(nn.Module):
         k_r = K_rot.transpose(1, 2).expand(-1, nh, -1, -1)
         s_r = torch.matmul(q_r, k_r.transpose(-2, -1)) * scale_r
 
-        scores = s_c + s_r
+        scores = (s_c + s_r).float()
         if self.attn_logit_cap is not None:
             scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
 
