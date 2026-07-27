@@ -157,10 +157,8 @@ def apply_rope_partial(
     seq_len = q.shape[1]
     hh = rotary_dim // 2
 
-    positions = torch.arange(offset, offset + seq_len, dtype=torch.float32, device=q.device)
-    freqs = torch.outer(positions, inv_freq[:hh])  # (seq_len, hh)
-    cos = freqs.cos().unsqueeze(0).unsqueeze(2)  # (1, seq_len, 1, hh)
-    sin = freqs.sin().unsqueeze(0).unsqueeze(2)
+    cos = cos_cache[offset:offset + seq_len, :hh].unsqueeze(0).unsqueeze(2)
+    sin = sin_cache[offset:offset + seq_len, :hh].unsqueeze(0).unsqueeze(2)
 
     # Split into rotated and pass-through parts
     q_rot = q[..., :rotary_dim]
