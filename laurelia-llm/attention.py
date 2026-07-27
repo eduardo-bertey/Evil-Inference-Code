@@ -167,7 +167,7 @@ class Attention(nn.Module):
         if self.causal and S_new > 1:
             offset_mask = S_full - S_new
             mask = torch.triu(
-                torch.full((S_new, S_full), float("-inf"), device=scores.device),
+                torch.full((S_new, S_full), float("-inf"), device=scores.device, dtype=scores.dtype),
                 diagonal=offset_mask + 1,
             )
             scores = scores + mask.unsqueeze(0).unsqueeze(0)
@@ -176,7 +176,7 @@ class Attention(nn.Module):
         attn_out = torch.matmul(attn_w, v)
 
         if self.use_xsa:
-            Vn = F.normalize(v, dim=-1)
+            Vn = F.normalize(v[:, :, -S_new:, :], dim=-1)
             attn_out = attn_out - (attn_out * Vn).sum(dim=-1, keepdim=True) * Vn
 
         attn_out = attn_out.transpose(1, 2)
