@@ -355,6 +355,10 @@ class CortexiaTransformer1(nn.Module):
             x = prompt.unsqueeze(0)
             caches = [None] * len(self.layers)
             offset = 0
+            prompt_len = x.shape[1]
+            for i in range(prompt_len):
+                logits, caches = self.forward_with_cache(x[:, i:i+1], offset, caches)
+                offset += 1
             for _ in range(max_new):
                 logits, caches = self.forward_with_cache(x[:, -1:], offset, caches)
                 offset += 1
@@ -400,6 +404,10 @@ class CortexiaTransformer2(nn.Module):
             x = prompt.unsqueeze(0)
             shared_cache = None
             offset = 0
+            prompt_len = x.shape[1]
+            for i in range(prompt_len):
+                logits, shared_cache = self.forward_with_cache(x[:, i:i+1], offset, shared_cache)
+                offset += 1
             for _ in range(max_new):
                 logits, shared_cache = self.forward_with_cache(x[:, -1:], offset, shared_cache)
                 offset += 1
@@ -444,6 +452,10 @@ class CortexiaTransformer3(nn.Module):
             x = prompt.unsqueeze(0)
             shared_cache = None
             offset = 0
+            prompt_len = x.shape[1]
+            for i in range(prompt_len):
+                logits, shared_cache = self.forward_with_cache(x[:, i:i+1], offset, shared_cache)
+                offset += 1
             for _ in range(max_new):
                 logits, shared_cache = self.forward_with_cache(x[:, -1:], offset, shared_cache)
                 offset += 1
