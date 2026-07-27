@@ -295,6 +295,7 @@ def main():
             logits, aux_loss = model(x)
             loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
             (loss / grad_accum).backward()
+            loss_val = loss.item()
             del logits, loss
             micro += 1
 
@@ -338,10 +339,10 @@ def main():
                     now = time.time()
                     tok = (step - last_rpt_step) * batch_size * grad_accum * seq_len
                     tps = tok / max(now - last_rpt_time, 0.001)
-                    print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
+                    print(f"e{epoch} s{step} loss {loss_val:.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
                     last_rpt_time = now
                     last_rpt_step = step
-                    pm.log(step, loss.item(), lr_curr, tps)
+                    pm.log(step, loss_val, lr_curr, tps)
 
                 if not test_mode and step % 50 == 0:
                     t_gen = time.time()
