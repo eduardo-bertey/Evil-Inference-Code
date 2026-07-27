@@ -287,6 +287,7 @@ class SharedCacheTransformerLayer(nn.Module):
         self.attn_logit_cap = attn_logit_cap
         self.qk_norm = qk_norm
         self.use_bma = use_bma
+        self._debug_step = False
         self.use_gated_attn = use_gated_attn
         self.gated_type = gated_type
 
@@ -403,6 +404,9 @@ class SharedCacheTransformerLayer(nn.Module):
             K_state = self.k_norm(K_state)
 
         scores = self._decoupled_scores(Q_state, Q_rotate, K_state, K_rotate, T)
+        if self.training and self._debug_step:
+            print(f"[SharedCache scores] max={scores.max().item():.4f} min={scores.min().item():.4f} "
+                  f"nan={scores.isnan().any().item()} inf={scores.isinf().any().item()} dtype={scores.dtype}")
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
 
@@ -471,6 +475,9 @@ class SharedCacheTransformerLayer(nn.Module):
                 K_state = self.k_norm(K_state)
 
         scores = self._decoupled_scores(Q_state, Q_rotate, K_state, K_rotate, S_new, T, S_new > 1)
+        if self.training and self._debug_step:
+            print(f"[SharedCache scores decode] max={scores.max().item():.4f} min={scores.min().item():.4f} "
+                  f"nan={scores.isnan().any().item()} inf={scores.isinf().any().item()} dtype={scores.dtype}")
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
 

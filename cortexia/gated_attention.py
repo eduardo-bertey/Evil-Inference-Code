@@ -370,6 +370,7 @@ class MLAGatedAttention(nn.Module):
         self.qk_norm = qk_norm
         self.gated_type = gated_type
         self.use_bma = use_bma
+        self._debug_step = False
 
         # BMA filter (pre-aggregation gating)
         if use_bma:
@@ -492,6 +493,9 @@ class MLAGatedAttention(nn.Module):
             K = self.k_norm(K)
 
         scores = self._decoupled_scores(Q_state, Q_rotate, K, K_rotate, T)
+        if self.training and self._debug_step:
+            print(f"[Gated scores] max={scores.max().item():.4f} min={scores.min().item():.4f} "
+                  f"nan={scores.isnan().any().item()} inf={scores.isinf().any().item()} dtype={scores.dtype}")
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V, self.num_heads, self.num_kv_groups).transpose(1, 2)
@@ -556,6 +560,9 @@ class MLAGatedAttention(nn.Module):
             Q_state = self.q_norm(Q_state)
             K_state = self.k_norm(K_state)
         scores = self._decoupled_scores(Q_state, Q_rot, K_state, K_rot, S_new, S_full, S_new > 1)
+        if self.training and self._debug_step:
+            print(f"[Gated scores decode] max={scores.max().item():.4f} min={scores.min().item():.4f} "
+                  f"nan={scores.isnan().any().item()} inf={scores.isinf().any().item()} dtype={scores.dtype}")
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
@@ -619,6 +626,9 @@ class MLAGatedAttention(nn.Module):
             Q_state = self.q_norm(Q_state)
             K_state = self.k_norm(K_state)
         scores = self._decoupled_scores(Q_state, Q_rot, K_state, K_rot, S_new, S_full, S_new > 1)
+        if self.training and self._debug_step:
+            print(f"[Gated scores partial] max={scores.max().item():.4f} min={scores.min().item():.4f} "
+                  f"nan={scores.isnan().any().item()} inf={scores.isinf().any().item()} dtype={scores.dtype}")
         attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
