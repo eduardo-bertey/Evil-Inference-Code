@@ -65,6 +65,7 @@ class RoPE(nn.Module):
         """
         seq_len = q.shape[1]
         half_dim = self.head_dim // 2
+        offset = int(offset)
 
         if offset + seq_len <= self.max_seq_len:
             cos = self.cos_cache[offset:offset + seq_len, :half_dim].unsqueeze(0).unsqueeze(2)
@@ -156,6 +157,7 @@ def apply_rope_partial(
 
     seq_len = q.shape[1]
     hh = rotary_dim // 2
+    offset = int(offset)
 
     cos = cos_cache[offset:offset + seq_len, :hh].unsqueeze(0).unsqueeze(2)
     sin = sin_cache[offset:offset + seq_len, :hh].unsqueeze(0).unsqueeze(2)
