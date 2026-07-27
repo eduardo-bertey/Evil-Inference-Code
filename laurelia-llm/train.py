@@ -5,6 +5,7 @@ en TODAS las capas. Sin MLA, sin BMA, sin Gated. Dense.
 """
 
 import sys, os, time, math, inspect, torch
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch.nn.functional as F
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
@@ -294,6 +295,7 @@ def main():
             logits, aux_loss = model(x)
             loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
             (loss / grad_accum).backward()
+            del logits, loss
             micro += 1
 
             if micro >= grad_accum:
