@@ -314,19 +314,27 @@ def main():
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
 
                 if step % 10 == 0:
-                    grad_stats = []
+                    layer_grads = {}
                     for name, param in model.named_parameters():
                         if param.grad is None:
                             continue
                         g = param.grad
-                        grad_stats.append((name, g.norm().item(), g.abs().max().item()))
-                    grad_stats.sort(key=lambda x: x[1], reverse=True)
-                    top_stats = grad_stats[:6]
-                    grad_report = ", ".join(
-                        f"{name.split('.')[-1]} norm={norm:.4g} max={mx:.4g}"
-                        for name, norm, mx in top_stats
+                        parts = name.split('.')
+                        layer_key = '.'.join(parts[:2]) if len(parts) > 2 else name
+                        if layer_key not in layer_grads:
+                            layer_grads[layer_key] = []
+                        layer_grads[layer_key].append(g.norm().item())
+
+                    layer_norms = []
+                    for layer_key, norms in layer_grads.items():
+                        avg_norm = sum(norms) / len(norms)
+                        layer_norms.append((layer_key, avg_norm))
+                    layer_norms.sort(key=lambda x: x[1], reverse=True)
+
+                    grad_report = " | ".join(
+                        f"{k}={v:.3g}" for k, v in layer_norms[:8]
                     )
-                    print(f"  Gradients (top params): {grad_report}")
+                    print(f"  Grad norms: {grad_report}")
 
                 opt.step()
                 opt.zero_grad()
