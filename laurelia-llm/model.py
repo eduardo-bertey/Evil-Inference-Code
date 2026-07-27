@@ -216,7 +216,7 @@ class TransformerLM(nn.Module):
         for i in range(prompt_len):
             logits, caches = self.forward_with_cache(x[:, i:i+1], i, caches)
 
-        for _ in range(max_new_tokens):
+        for gen_i in range(max_new_tokens):
             logits_last = logits[:, -1, :] / temperature
 
             if repetition_penalty != 1.0:
@@ -240,6 +240,6 @@ class TransformerLM(nn.Module):
             probs = torch.softmax(logits_last, dim=-1)
             next_tok = torch.multinomial(probs, num_samples=1)
             x = torch.cat([x, next_tok], dim=1)
-            logits, caches = self.forward_with_cache(next_tok, prompt_len + _ , caches)
+            logits, caches = self.forward_with_cache(next_tok, prompt_len + gen_i , caches)
 
         return x
