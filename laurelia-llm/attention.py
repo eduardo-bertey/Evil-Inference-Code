@@ -113,7 +113,7 @@ class Attention(nn.Module):
         if self.causal and S > 1:
             if self.causal_mask is None or self.causal_mask.shape[0] < S:
                 self.causal_mask = torch.triu(
-                    torch.full((S, S), float("-inf"), device=x.device), diagonal=1
+                    torch.full((S, S), float("-inf"), device=x.device, dtype=x.dtype), diagonal=1
                 )
             scores = scores + self.causal_mask[:S, :S].unsqueeze(0).unsqueeze(0)
 
