@@ -62,8 +62,7 @@ class Attention(nn.Module):
             self.k_norm = RMSNorm(head_dim)
 
         if causal:
-            mask = torch.triu(torch.full((max_seq_len, max_seq_len), float("-inf")), diagonal=1)
-            self.register_buffer("causal_mask", mask, persistent=False)
+            self.register_buffer("causal_mask", None, persistent=False)
 
         self._init_weights()
 
@@ -112,6 +111,10 @@ class Attention(nn.Module):
             scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
 
         if self.causal and S > 1:
+            if self.causal_mask is None or self.causal_mask.shape[0] < S:
+                self.causal_mask = torch.triu(
+                    torch.full((S, S), float("-inf"), device=x.device), diagonal=1
+                )
             scores = scores + self.causal_mask[:S, :S].unsqueeze(0).unsqueeze(0)
 
         attn_w = F.softmax(scores, dim=-1)

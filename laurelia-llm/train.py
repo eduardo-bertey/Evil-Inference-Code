@@ -178,13 +178,8 @@ def main():
     ]
     fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
     use_fused = fused_available and device.type == "cuda"
-    try:
-        import bitsandbytes as bnb
-        opt = bnb.optim.AdamW8bit(optim_groups, lr=lr, betas=(0.9, 0.95))
-        print(f"Optimizer: AdamW 8-bit (bitsandbytes)")
-    except ImportError:
-        opt = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), fused=use_fused)
-        print(f"Optimizer: AdamW fused={use_fused}")
+    opt = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), fused=use_fused)
+    print(f"Optimizer: AdamW fused={use_fused}")
     print(f"  decay={len(other_decay_params)} param tensors, emb_lr=lr/4, nodecay={len(nodecay_params)}")
 
     # ── Checkpoint ─────────────────────────────────────────────────────────
