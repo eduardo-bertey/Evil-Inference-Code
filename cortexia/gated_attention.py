@@ -430,7 +430,7 @@ class MLAGatedAttention(nn.Module):
         k_r = K_rot.transpose(1, 2).expand(-1, nh, -1, -1)
         s_r = torch.matmul(q_r, k_r.transpose(-2, -1)) * scale_r
 
-        scores = (s_c + s_r).float()
+        scores = s_c + s_r
         if self.attn_logit_cap is not None:
             scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
 
@@ -492,7 +492,7 @@ class MLAGatedAttention(nn.Module):
             K = self.k_norm(K)
 
         scores = self._decoupled_scores(Q_state, Q_rotate, K, K_rotate, T)
-        attn_w = F.softmax(scores, dim=-1).to(Q_state.dtype)
+        attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V, self.num_heads, self.num_kv_groups).transpose(1, 2)
 
@@ -556,7 +556,7 @@ class MLAGatedAttention(nn.Module):
             Q_state = self.q_norm(Q_state)
             K_state = self.k_norm(K_state)
         scores = self._decoupled_scores(Q_state, Q_rot, K_state, K_rot, S_new, S_full, S_new > 1)
-        attn_w = F.softmax(scores, dim=-1).to(Q_state.dtype)
+        attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
 
@@ -618,7 +618,7 @@ class MLAGatedAttention(nn.Module):
             Q_state = self.q_norm(Q_state)
             K_state = self.k_norm(K_state)
         scores = self._decoupled_scores(Q_state, Q_rot, K_state, K_rot, S_new, S_full, S_new > 1)
-        attn_w = F.softmax(scores, dim=-1).to(Q_state.dtype)
+        attn_w = F.softmax(scores, dim=-1)
         attn_w = self.attn_dropout(attn_w)
         v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
 
