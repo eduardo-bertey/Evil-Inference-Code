@@ -339,7 +339,7 @@ class SharedCacheTransformerLayer(nn.Module):
         """Decoupled content + RoPE scoring, igual que MLA."""
         nh, nkv, hd, dr = self.num_heads, self.num_kv_groups, self.head_dim, self.d_rotate
         scale_c = 1.0 / math.sqrt(self.d_c) if self.qk_norm else 1.0 / math.sqrt(hd)
-        scale_r = 1.0 / math.sqrt(dr)
+        scale_r = 1.0
 
         k_c = repeat_kv(K_state, nh, nkv).transpose(1, 2)
         q_c = Q_state.transpose(1, 2)
