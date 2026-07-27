@@ -71,7 +71,7 @@ bpe_vocab = 32000
 
 # Sandwich MLA + BMA + Gated (en TODAS las capas)
 use_mla = True
-use_gated_attn = True
+use_gated_attn = False
 gated_type = "headwise"
 use_bma = True
 use_xsa = False
