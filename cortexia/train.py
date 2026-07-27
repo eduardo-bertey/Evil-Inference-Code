@@ -320,7 +320,12 @@ def main():
                             continue
                         g = param.grad
                         parts = name.split('.')
-                        layer_key = '.'.join(parts[:2]) if len(parts) > 2 else name
+                        if len(parts) > 2 and parts[0] == 'transformer' and parts[1] == 'layers':
+                            layer_key = f"L{parts[2]}"
+                        elif parts[0] == 'transformer' and parts[1] == 'head':
+                            layer_key = 'head'
+                        else:
+                            layer_key = parts[0]
                         if layer_key not in layer_grads:
                             layer_grads[layer_key] = []
                         layer_grads[layer_key].append(g.norm().item())
@@ -332,7 +337,7 @@ def main():
                     layer_norms.sort(key=lambda x: x[1], reverse=True)
 
                     grad_report = " | ".join(
-                        f"{k}={v:.3g}" for k, v in layer_norms[:8]
+                        f"{k}={v:.3g}" for k, v in layer_norms
                     )
                     print(f"  Grad norms: {grad_report}")
 
