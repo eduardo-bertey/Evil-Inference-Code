@@ -248,9 +248,7 @@ def train_model(model, name, data, vocab_size, idx2char, seq_len=64, batch_size=
             xb = x_batch[i:i+batch_size]
             yb = y_batch[i:i+batch_size]
             logits = model(xb)
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = yb[:, 1:].contiguous()
-            loss = F.cross_entropy(shift_logits.view(-1, vocab_size), shift_labels.view(-1))
+            loss = F.cross_entropy(logits.view(-1, vocab_size), yb.view(-1))
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()

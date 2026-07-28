@@ -306,9 +306,7 @@ def main():
                 opt.zero_grad()
 
             logits, aux_loss = model(x)
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = y[:, 1:].contiguous()
-            loss = F.cross_entropy(shift_logits.reshape(-1, tokenizer.vocab_size), shift_labels.reshape(-1))
+            loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
             (loss / grad_accum).backward()
             micro += 1
 
