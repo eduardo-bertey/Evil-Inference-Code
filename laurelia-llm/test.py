@@ -92,7 +92,7 @@ print(f"  SAME module, S=2: maxdiff={d2:.2e}  {'PASS' if d2 < 1e-4 else 'FAIL'}"
 x_a = x1[:, :1, :]
 x_b = torch.randn(2, 1, cfg.dim)
 x_ab = torch.cat([x_a, x_b], dim=1)
-ref_ab, _ = attn(x_ab)
+ref_ab = attn(x_ab)
 
 out_a, ca = attn.forward_with_cache(x_a, 0, None)
 out_b, cb = attn.forward_with_cache(x_b, 1, ca)
