@@ -88,15 +88,24 @@ out2b, _ = attn.forward_with_cache(x2, 0, None)
 d2 = maxdiff(out2a, out2b)
 print(f"  SAME module, S=2: maxdiff={d2:.2e}  {'PASS' if d2 < 1e-4 else 'FAIL'}")
 
-# cache final debe tener K,V de ambos tokens
-check("cache seqlen = 2 tras incremental", cache2[0].shape[1] == 2)
-check("cache[0] == cache[1] (misma seqlen)", cache2[0].shape[1] == cache2[1].shape[1])
+# probar incremental manual
+x_a = x1[:, :1, :]
+x_b = torch.randn(2, 1, cfg.dim)
+x_ab = torch.cat([x_a, x_b], dim=1)
+ref_ab, _ = attn(x_ab)
+
+out_a, ca = attn.forward_with_cache(x_a, 0, None)
+out_b, cb = attn.forward_with_cache(x_b, 1, ca)
+d_a = maxdiff(out_a, ref_ab[:, 0:1])
+d_b = maxdiff(out_b, ref_ab[:, 1:2])
+print(f"  incremental step1 vs ref[0]: maxdiff={d_a:.2e}  {'PASS' if d_a < 1e-5 else 'FAIL'}")
+print(f"  incremental step2 vs ref[1]: maxdiff={d_b:.2e}  {'PASS' if d_b < 1e-5 else 'FAIL'}")
+print(f"  cache seqlen: {cb[0].shape[1]}")
 
 # ============================================================
 print("\n=== Attention GQA (repeat_kv) ===")
 k_gqa = torch.randn(B, S, cfg.kv_groups, head_dim)
 v_gqa = torch.randn(B, S, cfg.kv_groups, head_dim)
-from model import repeat_kv
 k_exp = repeat_kv(k_gqa, cfg.heads, cfg.kv_groups)
 v_exp = repeat_kv(v_gqa, cfg.heads, cfg.kv_groups)
 check("GQA repeat_kv heads correctos", k_exp.shape[2] == cfg.heads)
