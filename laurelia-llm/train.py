@@ -166,10 +166,7 @@ def main():
         total_steps = steps_per_epoch * 200000
         epochs_do = 200000
 
-    num_warmup = config.warm_up
-    num_decay = int(total_steps * 0.15)
-    num_stable = total_steps - num_warmup - num_decay
-    scheduler = get_wsd_schedule(optimizer, num_warmup, num_stable, num_decay)
+    scheduler = None
 
     emb_p = model.embeddings.weight.numel()
     layer_p = sum(p.numel() for b in model.blocks for p in b.parameters())
@@ -220,9 +217,8 @@ def main():
             if (batch_start // config.batch_size + 1) % config.grad_acc == 0 or batch_end >= n_seq:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-                lr_curr = scheduler.get_last_lr()[0]
+                lr_curr = config.learning_rate
                 optimizer.step()
-                scheduler.step()
                 optimizer.zero_grad()
                 step += 1
 

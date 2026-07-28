@@ -26,7 +26,7 @@ class Config:
     learning_rate: float = 3e-4
     weight_decay: float = 0.1
     betas: tuple = (0.9, 0.95)
-    warm_up: int = 50
+    warm_up: int = 500
 
 
 def repeat_kv(x, num_heads, num_kv_groups):
