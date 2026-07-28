@@ -80,7 +80,11 @@ def main():
         pusher = PeriodicPusher(hf, interval_minutes=20)
     pm = PlotManager(hf if not test_mode else None, save_dir=_DIR, plot_interval=plot_interval)
 
-    dtype = torch.bfloat16
+    if test_mode:
+        dtype = torch.float32
+    else:
+        prec = input("Precision (n=f32, b=bf16): ").strip().lower()
+        dtype = torch.bfloat16 if prec == "b" else torch.float32
     print(f"  Compute: {dtype}")
 
     tokenizer = None
