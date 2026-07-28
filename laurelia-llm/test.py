@@ -174,7 +174,7 @@ expected_unif = v_unif.mean(dim=2, keepdim=True)
 check("SDPA uniforme: output ≈ mean(V)",
       torch.allclose(out_unif, expected_unif, atol=1e-4))
 
-# Attention completa con known weights (sin RoPE)
+# Attention completa con known weights, S=1 (sin RoPE)
 cfg_no_rope = Config()
 cfg_no_rope.rotary_pct = 0.0
 attn_norope = Attention(cfg_no_rope)
@@ -182,18 +182,21 @@ attn_norope.eval()
 attn_norope.q_proj.weight.data.zero_()
 attn_norope.k_proj.weight.data.zero_()
 attn_norope.v_proj.weight.data.zero_()
-# o_proj: identity block-diag for 12 heads
-eye = torch.eye(head_dim)
-attn_norope.o_proj.weight.data = eye.repeat(12, 1)
-# Q[0] = 10, K[0] = 10 → attention en pos0
+# o_proj: identity
+attn_norope.o_proj.weight.data = torch.eye(cfg.dim)
+# Q = 10 en dim 0, K[0] = 10 en dim 0 → attend a K[0] → output = V[0]
 attn_norope.q_proj.weight.data[0, 0] = 10.0
 attn_norope.k_proj.weight.data[0, 0] = 10.0
-# V: dim0 = 1.0, output debe tener 1.0 en dim0 en pos0
-attn_norope.v_proj.weight.data[0, 0] = 1.0
-x_test = torch.ones(1, 3, cfg.dim)
-out_attn = attn_norope(x_test)
-check("Attention completa: attend pos0 con Q/K/V conocidos",
-      torch.allclose(out_attn[0, 0, 0], torch.tensor(1.0), atol=1e-1))
+# V[0] dim 0 = 1.0, V[1] otro valor
+attn_norope.v_proj.weight.data[0, 0] = 2.0
+attn_norope.v_proj.weight.data[0, 1] = 1.0
+x_test = torch.eye(cfg.dim).unsqueeze(0)  # (1, 768, 768), one-hot por pos
+out_attn = attn_norope(x_test)  # (1, 768, 768)
+# position 0: x=[1,0,...], q dim0 = 10*1 = 10, k[0] dim0 = 10*1 = 10
+# QK^T = [100, 0, 0, ...] output = V[0] = [2, 1, 0, ...] 
+# after o_proj identity: out[0,0,0] = 2, out[0,0,1] = 1
+check("Attention: attend pos0 con Q/K/V conocidos",
+      torch.allclose(out_attn[0, 0, 0:2], torch.tensor([2.0, 1.0]), atol=1e-1))
 
 # ============================================================
 print("\n=== Attention GQA (repeat_kv) ===")
