@@ -19,6 +19,9 @@ def check(name, cond, detail=""):
         fail_ += 1
         print(f"  FAIL {name}" + (f" — {detail}" if detail else ""))
 
+def maxdiff(a, b):
+    return (a - b).abs().max().item()
+
 print("=== Config ===")
 cfg = Config()
 print(f"  dim={cfg.dim}, heads={cfg.heads}, kv_groups={cfg.kv_groups}, head_dim={cfg.dim//cfg.heads}")
@@ -73,15 +76,23 @@ attn = Attention(cfg)
 attn.eval()
 
 x = torch.randn(B, S, cfg.dim)
-logits_ref, _ = attn(x)  # forward normal con causal
 
-# forward_with_cache offset=0, sin cache previo — debe dar igual
-logits_cache, cache = attn.forward_with_cache(x, offset=0, cache=None)
-check("attn forward == forward_with_cache(offset=0, cache=None)",
-      torch.allclose(logits_ref, logits_cache, atol=1e-5))
+# Con S=1, forward_with_cache(is_causal=False) = forward(is_causal=True)
+x1 = x[:, :1, :]
+out_fwd1, _ = attn(x1)
+out_cache1, cache1 = attn.forward_with_cache(x1, offset=0, cache=None)
+check("attn single token: forward == forward_with_cache",
+      torch.allclose(out_fwd1, out_cache1, atol=1e-5))
 
-cache_len = cache[0].shape[1]
-check("cache length == S", cache_len == S)
+# Con S>1 y cache=None, forward_with_cache usa is_causal=True → mismo resultado
+out_fwd4, _ = attn(x)
+out_cache4, _ = attn.forward_with_cache(x, offset=0, cache=None)
+diff = maxdiff(out_fwd4, out_cache4)
+check("attn multi token: forward == forward_with_cache (is_causal cuando cache=None)",
+      torch.allclose(out_fwd4, out_cache4, atol=1e-4), f"maxdiff={diff:.2e}")
+
+cache_len = cache1[0].shape[1]
+check("cache length == S", cache_len == 1)
 
 # ============================================================
 print("\n=== Attention incremental (KV cache) ===")
@@ -96,8 +107,10 @@ ref_out, _ = attn.forward(x12)
 out1, cache1 = attn.forward_with_cache(x1, offset=0, cache=None)
 out2, cache2 = attn.forward_with_cache(x2, offset=1, cache=cache1)
 
-check("incremental: out1 == ref[0]", torch.allclose(out1, ref_out[:, 0:1], atol=1e-5))
-check("incremental: out2 == ref[1]", torch.allclose(out2, ref_out[:, 1:2], atol=1e-5))
+d1 = maxdiff(out1, ref_out[:, 0:1])
+d2 = maxdiff(out2, ref_out[:, 1:2])
+check("incremental: out1 == ref[0]", torch.allclose(out1, ref_out[:, 0:1], atol=1e-5), f"maxdiff={d1:.2e}")
+check("incremental: out2 == ref[1]", torch.allclose(out2, ref_out[:, 1:2], atol=1e-5), f"maxdiff={d2:.2e}")
 
 # cache final debe tener K,V de ambos tokens
 check("cache seqlen = 2 tras incremental", cache2[0].shape[1] == 2)
@@ -122,13 +135,22 @@ for g in range(cfg.kv_groups):
 print("\n=== LLM forward vs forward_with_cache ===")
 model = LLM(cfg)
 model.eval()
-input_ids = torch.randint(0, 1000, (B, S))
 
-logits_fwd, loss_fwd = model(input_ids)
-logits_cached, caches = model.forward_with_cache(input_ids, 0, None)
+# Con S=1: forward == forward_with_cache
+ids1 = torch.randint(0, 1000, (B, 1))
+logits_fwd1, _ = model(ids1)
+logits_cache1, caches = model.forward_with_cache(ids1, 0, None)
+check("LLM single token: forward == forward_with_cache",
+      torch.allclose(logits_fwd1, logits_cache1, atol=1e-4))
 
-check("LLM forward vs forward_with_cache logits",
-      torch.allclose(logits_fwd, logits_cached, atol=1e-4))
+# Con S>1 y cache=None: forward_with_cache usa is_causal → mismo que forward
+ids4 = torch.randint(0, 1000, (B, S))
+logits_fwd4, _ = model(ids4)
+logits_cache4, _ = model.forward_with_cache(ids4, 0, None)
+d = maxdiff(logits_fwd4, logits_cache4)
+check("LLM multi token: forward == forward_with_cache",
+      torch.allclose(logits_fwd4, logits_cache4, atol=1e-3), f"maxdiff={d:.2e}")
+
 check("LLM number of caches == layers", len(caches) == cfg.layers)
 
 # ============================================================

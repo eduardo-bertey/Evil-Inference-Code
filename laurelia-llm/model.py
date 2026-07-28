@@ -106,7 +106,7 @@ class Attention(nn.Module):
 
         att_output = F.scaled_dot_product_attention(
             q, k, v,
-            is_causal=False,
+            is_causal=(cache is None),
         )
 
         att_output = att_output.transpose(1, 2).contiguous().view(B, S_new, -1)
