@@ -73,7 +73,7 @@ bpe_vocab = 32000
 
 # Dense GQA + XSA (sin MLA, sin BMA, sin Gated)
 use_mla = False
-use_xsa = True
+use_xsa = False
 qk_norm = True
 use_sandwich_norm = True
 noise_std = 0.01
