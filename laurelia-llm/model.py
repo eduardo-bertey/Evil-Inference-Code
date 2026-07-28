@@ -26,7 +26,7 @@ class Config:
     learning_rate: float = 3e-4
     weight_decay: float = 0.1
     betas: tuple = (0.9, 0.95)
-    warm_up: int = 500
+    warm_up: int = 50
 
 
 def repeat_kv(x, num_heads, num_kv_groups):
@@ -221,12 +221,10 @@ class LLM(nn.Module):
 
         loss = None
         if labels is not None:
-            shift_logits = logits[:, :-1, :].contiguous()
-            shift_labels = labels[:, 1:].contiguous()
             loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.0, reduction="mean")
             loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1),
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
             )
 
         return logits, loss
