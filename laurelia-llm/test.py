@@ -80,11 +80,17 @@ theta1 = pos / (10000.0 ** (2*1/4))
 c0, s0 = math.cos(theta0), math.sin(theta0)
 c1, s1 = math.cos(theta1), math.sin(theta1)
 x_rot = rope_test(x, x, offset=pos)[0]
+# RoPE code: first_half (dims 0,1) y second_half (dims 2,3)
+# first[n] * cos[n] - second[n] * sin[n], luego first[n] * sin[n] + second[n] * cos[n]
+# dim 0 (first[0]) y dim 2 (second[0]) son el par 0 (θ0)
+# dim 1 (first[1]) y dim 3 (second[1]) son el par 1 (θ1)
+f0, f1 = 1.0, 2.0   # first half = q_rot[..., :2]
+s0_, s1_ = 3.0, 4.0  # second half = q_rot[..., 2:4]
 expected_rot = torch.tensor([[[[
-    x[0,0,0,0]*c0 - x[0,0,0,1]*s0,
-    x[0,0,0,0]*s0 + x[0,0,0,1]*c0,
-    x[0,0,0,2]*c1 - x[0,0,0,3]*s1,
-    x[0,0,0,2]*s1 + x[0,0,0,3]*c1,
+    f0*c0 - s0_*s0,    # dim 0 = first[0]*c0 - second[0]*s0
+    f1*c1 - s1_*s1,    # dim 1 = first[1]*c1 - second[1]*s1
+    f0*s0 + s0_*c0,    # dim 2 = first[0]*s0 + second[0]*c0
+    f1*s1 + s1_*c1,    # dim 3 = first[1]*s1 + second[1]*c1
 ]]]])
 check("rotación manual 2D coincide", torch.allclose(x_rot, expected_rot, atol=1e-6))
 
