@@ -3,7 +3,7 @@ import math, sys
 import torch
 import torch.nn.functional as F
 from rope import RoPE
-from model import Config, Attention, LLM
+from model import Config, Attention, LLM, repeat_kv
 
 device = "cpu"
 torch.manual_seed(42)
