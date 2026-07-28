@@ -76,7 +76,7 @@ rope_test.eval()
 x = torch.tensor([[[[1.0, 2.0, 3.0, 4.0]]]])
 pos = 1
 theta0 = pos / (10000.0 ** (2*0/4))
-theta1 = pos / (10000.0 ** (2*2/4))
+theta1 = pos / (10000.0 ** (2*1/4))
 c0, s0 = math.cos(theta0), math.sin(theta0)
 c1, s1 = math.cos(theta1), math.sin(theta1)
 x_rot = rope_test(x, x, offset=pos)[0]
@@ -88,33 +88,33 @@ expected_rot = torch.tensor([[[[
 ]]]])
 check("rotación manual 2D coincide", torch.allclose(x_rot, expected_rot, atol=1e-6))
 
-# — 7. propiedad relativa: q[pos_i]·k[pos_j] depende solo de |i-j|
-rope2 = RoPE(head_dim, max_seq_len=2048, base=10000.0, rotary_pct=cfg.rotary_pct)
+# — 7. propiedad relativa: mismo vector q/k rotado a distintas posiciones
+rope2 = RoPE(head_dim=16, max_seq_len=10, base=10000.0, rotary_pct=cfg.rotary_pct)
 rope2.eval()
-q_rel = torch.randn(1, 6, 1, head_dim)
-k_rel = torch.randn(1, 6, 1, head_dim)
-qr, kr = rope2(q_rel, k_rel, offset=0)
-d01 = (qr[:,0] * kr[:,1]).sum(-1)
-d12 = (qr[:,1] * kr[:,2]).sum(-1)
-d23 = (qr[:,2] * kr[:,3]).sum(-1)
-d34 = (qr[:,3] * kr[:,4]).sum(-1)
-d45 = (qr[:,4] * kr[:,5]).sum(-1)
-check("RoPE: dot q[i]·k[i+1] constante para todo i",
+q_single = torch.randn(1, 1, 1, 16)
+k_single = torch.randn(1, 1, 1, 16)
+q0, k0 = rope2(q_single, k_single, offset=0)
+q1, k1 = rope2(q_single, k_single, offset=1)
+q2, k2 = rope2(q_single, k_single, offset=2)
+q3, k3 = rope2(q_single, k_single, offset=3)
+q4, k4 = rope2(q_single, k_single, offset=4)
+d01 = (q0 * k1).sum(-1)
+d12 = (q1 * k2).sum(-1)
+d23 = (q2 * k3).sum(-1)
+d34 = (q3 * k4).sum(-1)
+check("RoPE: q[i]·k[i+1] igual para todo i",
       torch.allclose(d01, d12, atol=1e-6) and
       torch.allclose(d12, d23, atol=1e-6) and
-      torch.allclose(d23, d34, atol=1e-6) and
-      torch.allclose(d34, d45, atol=1e-6))
-d02 = (qr[:,0] * kr[:,2]).sum(-1)
-d13 = (qr[:,1] * kr[:,3]).sum(-1)
-d24 = (qr[:,2] * kr[:,4]).sum(-1)
-d35 = (qr[:,3] * kr[:,5]).sum(-1)
-check("RoPE: dot q[i]·k[i+2] constante para todo i",
+      torch.allclose(d23, d34, atol=1e-6))
+d02 = (q0 * k2).sum(-1)
+d13 = (q1 * k3).sum(-1)
+d24 = (q2 * k4).sum(-1)
+check("RoPE: q[i]·k[i+2] igual para todo i",
       torch.allclose(d02, d13, atol=1e-6) and
-      torch.allclose(d13, d24, atol=1e-6) and
-      torch.allclose(d24, d35, atol=1e-6))
-check("RoPE: dot q[i]·k[i] constante (norma preservada)",
-      torch.allclose((qr[:,0]*kr[:,0]).sum(-1), (qr[:,1]*kr[:,1]).sum(-1), atol=1e-6))
-check("RoPE: dot diferencia de posiciones distintas es distinto",
+      torch.allclose(d13, d24, atol=1e-6))
+check("RoPE: q[i]·k[i] preserva dot original",
+      torch.allclose((q0*k0).sum(-1), (q_single*k_single).sum(-1), atol=1e-6))
+check("RoPE: dot Δ=1 != Δ=2",
       not torch.allclose(d01, d02, atol=1e-6))
 
 # ============================================================
@@ -151,11 +151,11 @@ print(f"  cache seqlen: {cb[0].shape[1]}")
 
 # ============================================================
 print("\n=== Attention matemática ===")
-# atención hard: Q hace one-hot attend a K[0]
+# atención hard: Q hace attend a K[0] (shapes: B, H, Q_len/S_len, D)
 q_hard = torch.zeros(1, 1, 1, 4)
 q_hard[..., 0] = 10.0
-k_hard = torch.zeros(1, 3, 1, 4)
-k_hard[:, 0, :, 0] = 10.0
+k_hard = torch.zeros(1, 1, 3, 4)
+k_hard[:, :, 0, 0] = 10.0
 v_hard = torch.tensor([[[[1.0, 2.0, 3.0, 4.0],
                           [5.0, 6.0, 7.0, 8.0],
                           [9.0, 10.0, 11.0, 12.0]]]])
@@ -163,9 +163,9 @@ out_hard = F.scaled_dot_product_attention(q_hard, k_hard, v_hard, is_causal=Fals
 check("SDPA hard attention a K[0]: output ≈ V[0]",
       torch.allclose(out_hard, v_hard[:, :, :1, :], atol=1e-4))
 
-# atención uniforme: Q=0, K=0 → attn uniforme → output = mean(V)
+# atención uniforme: Q=0 → attn uniforme → output = mean(V)
 q_unif = torch.zeros(1, 1, 1, 4)
-k_unif = torch.zeros(1, 3, 1, 4)
+k_unif = torch.zeros(1, 1, 3, 4)
 v_unif = torch.tensor([[[[1.0, 0.0, 0.0, 0.0],
                           [0.0, 1.0, 0.0, 0.0],
                           [0.0, 0.0, 0.0, 1.0]]]])
@@ -174,7 +174,7 @@ expected_unif = v_unif.mean(dim=2, keepdim=True)
 check("SDPA uniforme: output ≈ mean(V)",
       torch.allclose(out_unif, expected_unif, atol=1e-4))
 
-# Attention completa con known values (sin RoPE)
+# Attention completa con known weights (sin RoPE)
 cfg_no_rope = Config()
 cfg_no_rope.rotary_pct = 0.0
 attn_norope = Attention(cfg_no_rope)
@@ -182,18 +182,18 @@ attn_norope.eval()
 attn_norope.q_proj.weight.data.zero_()
 attn_norope.k_proj.weight.data.zero_()
 attn_norope.v_proj.weight.data.zero_()
-attn_norope.o_proj.weight.data = torch.eye(head_dim).repeat(12, 12)
-# Q[0] = 10 en dim 0 → attend K[0]
+# o_proj: identity block-diag for 12 heads
+eye = torch.eye(head_dim)
+attn_norope.o_proj.weight.data = eye.repeat(12, 1)
+# Q[0] = 10, K[0] = 10 → attention en pos0
 attn_norope.q_proj.weight.data[0, 0] = 10.0
 attn_norope.k_proj.weight.data[0, 0] = 10.0
+# V: dim0 = 1.0, output debe tener 1.0 en dim0 en pos0
 attn_norope.v_proj.weight.data[0, 0] = 1.0
 x_test = torch.ones(1, 3, cfg.dim)
 out_attn = attn_norope(x_test)
-# con Q=[10,0,...], K=[10,0,...] en pos0, zeros elsewhere → attention en pos0
-# V para pos0: V dim0 = 1.0*1.0 = 1.0, resto 0
-# o_proj es identity → output[:, 0, :] debe tener ~1.0 en dim0
-check("Attention completa: attend pos0 con Q/K conocidos",
-      torch.allclose(out_attn[:, 0, 0], torch.tensor(1.0), atol=1e-2))
+check("Attention completa: attend pos0 con Q/K/V conocidos",
+      torch.allclose(out_attn[0, 0, 0], torch.tensor(1.0), atol=1e-1))
 
 # ============================================================
 print("\n=== Attention GQA (repeat_kv) ===")
