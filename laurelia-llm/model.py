@@ -244,7 +244,7 @@ class LLM(nn.Module):
 
     @torch.no_grad()
     def generate(self, input_ids, max_new_tokens=100, temperature=0.8, top_k=50,
-                 top_p=0.9, repetition_penalty=1.1):
+                 top_p=0.9, repetition_penalty=1.1, eos_token_id=None):
         caches = None
         prompt_len = input_ids.shape[1]
 
@@ -274,6 +274,10 @@ class LLM(nn.Module):
 
             probs = torch.softmax(logits_last, dim=-1)
             next_tok = torch.multinomial(probs, num_samples=1)
+
+            if eos_token_id is not None and next_tok.item() == eos_token_id:
+                break
+
             input_ids = torch.cat([input_ids, next_tok], dim=1)
             logits, caches = self.forward_with_cache(next_tok, prompt_len + gen_i, caches)
 
