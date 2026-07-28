@@ -34,7 +34,7 @@ class RoPE(nn.Module):
             self.rotary_dim = self.rotary_dim - (self.rotary_dim % 2)
         self.rotary_half = self.rotary_dim // 2
 
-        inv_freq = 1.0 / (base ** (torch.arange(0, self.rotary_half).float() / self.rotary_dim))
+        inv_freq = 1.0 / (base ** (torch.arange(0, self.rotary_half).float() * 2.0 / head_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
         self._build_cache(max_seq_len)
