@@ -15,7 +15,7 @@ class Config:
     dim = 768
     heads = 12
     kv_groups = 4
-    layers = 27
+    layers = 16
     ffn_dim = 3072
     block_size = 1024
     emb_num = 32000
