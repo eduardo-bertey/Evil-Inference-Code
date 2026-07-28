@@ -96,7 +96,7 @@ def main():
                 print(f"  Unknown: {cmd}")
             continue
 
-        ids = tok.encode(prompt)
+        ids = tok.encode(prompt).ids
         x = torch.tensor([ids], dtype=torch.long, device=device)
         with torch.no_grad():
             out = model.generate(x, max_new_tokens=max_new, temperature=temperature,
