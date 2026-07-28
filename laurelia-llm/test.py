@@ -182,9 +182,9 @@ check("SDPA uniforme: output ≈ mean(V)",
 
 # Atención hard con SDPA directo (shapes correctas) + verificar proyecciones lineales
 q_hard2 = torch.zeros(1, 4, 1, 8)
-q_hard2[:, :, 0, 0] = 5.0
+q_hard2[:, :, 0, 0] = 50.0
 k_hard2 = torch.zeros(1, 4, 3, 8)
-k_hard2[:, :, 0, 0] = 5.0
+k_hard2[:, :, 0, 0] = 50.0
 v_hard2 = torch.arange(96, dtype=torch.float32).reshape(1, 4, 3, 8)
 out_hard2 = F.scaled_dot_product_attention(q_hard2, k_hard2, v_hard2, is_causal=False)
 # solo K[0] atrae atención por tener dim0=5 igual que Q, el resto es 0
