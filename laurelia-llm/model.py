@@ -110,7 +110,7 @@ class Attention(nn.Module):
             is_causal=True,
         )
 
-        att_output = att_output.transpose(1, 2).contiguous().view(B, S_new, D)
+        att_output = att_output.transpose(1, 2).contiguous().view(B, S_new, -1)
         return self.o_proj(att_output), new_cache
 
 
