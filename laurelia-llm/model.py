@@ -1,226 +1,261 @@
-"""TransformerLM: Dense GQA + XSA.
+"""TransformerLM — Dense GQA, basado en LLM_350M_DENSE.
 
-Sin MLA, sin BMA, sin gated, sin MoE.
+Init adaptativo por capa, weight tying, KV cache para inferencia.
 """
 
-import math
+import math, inspect
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from rope import RoPE
 
-from attention import Attention, RMSNorm
+
+class Config:
+    drop = 0.0
+    dim = 768
+    heads = 12
+    kv_groups = 4
+    layers = 24
+    ffn_dim = 3072
+    block_size = 980
+    emb_num = 32000
+    rotary_pct = 0.25
+
+    batch_size: int = 4
+    grad_acc: int = 12
+    learning_rate: float = 3e-4
+    weight_decay: float = 0.1
+    betas: tuple = (0.9, 0.95)
+    warm_up: int = 50
 
 
-class SwiGLUFFN(nn.Module):
-    def __init__(self, d_model, inter_dim, dropout=0.0, bias=False):
+def repeat_kv(x, num_heads, num_kv_groups):
+    if num_kv_groups == num_heads:
+        return x
+    return x.repeat_interleave(num_heads // num_kv_groups, dim=2)
+
+
+class Attention(nn.Module):
+    def __init__(self, config):
         super().__init__()
-        self.w_gate = nn.Linear(d_model, inter_dim, bias=bias)
-        self.w_up = nn.Linear(d_model, inter_dim, bias=bias)
-        self.w_down = nn.Linear(inter_dim, d_model, bias=bias)
-        self.dropout = nn.Dropout(dropout) if dropout > 0.0 else nn.Identity()
+        self.num_heads = config.heads
+        self.num_kv_groups = config.kv_groups
+        self.head_dim = config.dim // config.heads
+        self.causal = True
+
+        self.q_proj = nn.Linear(config.dim, self.num_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
+        self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, 'rotary_pct', 0.25))
+        self.attn_dropout = nn.Dropout(config.drop)
+
+        self.q_proj.is_attention = True
+        self.k_proj.is_attention = True
+        self.v_proj.is_attention = True
+        self.o_proj.is_residual_proj = True
 
     def forward(self, x):
-        gate = torch.nn.functional.silu(self.w_gate(x))
-        up = self.w_up(x)
-        return self.dropout(self.w_down(gate * up))
+        B, T, D = x.shape
+        q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
+        k = self.k_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
+        v = self.v_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
 
+        q, k = self.rope(q, k, 0)
 
-class TransformerLayer(nn.Module):
-    def __init__(self, d_model, num_heads, num_kv_groups=0, head_dim=None,
-                 max_seq_len=2048, rope_base=10000.0, rope_scaling=1.0,
-                 causal=True, dropout=0.0, ffn_dropout=0.0,
-                 attn_logit_cap=None, bias=False, norm_eps=1e-5,
-                 ffn_expansion=4.0, use_swiglu=True, ffn_round_to=64,
-                 use_xsa=False, qk_norm=True, use_sandwich_norm=False,
-                 rotary_pct=1.0):
-        super().__init__()
-        if num_kv_groups == 0:
-            num_kv_groups = num_heads
-        if head_dim is None:
-            head_dim = d_model // num_heads
+        k = repeat_kv(k, self.num_heads, self.num_kv_groups)
+        v = repeat_kv(v, self.num_heads, self.num_kv_groups)
 
-        self.use_sandwich_norm = use_sandwich_norm
+        q = q.transpose(1, 2)
+        k = k.transpose(1, 2)
+        v = v.transpose(1, 2)
 
-        self.attn_norm = RMSNorm(d_model, eps=norm_eps)
-        if use_sandwich_norm:
-            self.attn_norm_out = RMSNorm(d_model, eps=norm_eps)
-
-        self.attention = Attention(
-            d_model=d_model, num_heads=num_heads, num_kv_groups=num_kv_groups,
-            head_dim=head_dim, max_seq_len=max_seq_len, rope_base=rope_base,
-            rope_scaling=rope_scaling, causal=causal, dropout=dropout,
-            attn_logit_cap=attn_logit_cap, bias=bias,
-            use_xsa=use_xsa, qk_norm=qk_norm, rotary_pct=rotary_pct,
+        att_output = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=True,
         )
 
-        inter_dim = int(d_model * ffn_expansion)
-        inter_dim = ((inter_dim + ffn_round_to - 1) // ffn_round_to) * ffn_round_to
+        att_output = att_output.transpose(1, 2).contiguous().view(B, T, D)
+        return self.o_proj(att_output)
 
-        self.ffn_norm = RMSNorm(d_model, eps=norm_eps)
-        if use_sandwich_norm:
-            self.ffn_norm_out = RMSNorm(d_model, eps=norm_eps)
+    def forward_with_cache(self, x, offset, cache):
+        B, S_new, _ = x.shape
 
-        if use_swiglu:
-            self.ffn = SwiGLUFFN(d_model, inter_dim, ffn_dropout, bias)
+        q_new = self.q_proj(x).view(B, S_new, self.num_heads, self.head_dim)
+        k_new = self.k_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
+        v_new = self.v_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
+
+        q_new, k_new = self.rope(q_new, k_new, offset)
+
+        if cache is not None:
+            k_full = torch.cat([cache[0], k_new], dim=1)
+            v_full = torch.cat([cache[1], v_new], dim=1)
         else:
-            self.ffn = nn.Sequential(
-                nn.Linear(d_model, inter_dim, bias=bias),
-                nn.GELU(),
-                nn.Dropout(ffn_dropout),
-                nn.Linear(inter_dim, d_model, bias=bias),
-            )
+            k_full = k_new
+            v_full = v_new
 
-        self._init_weights()
+        new_cache = (k_full, v_full)
 
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, RMSNorm):
-                nn.init.ones_(m.weight)
+        k_exp = repeat_kv(k_full, self.num_heads, self.num_kv_groups)
+        v_exp = repeat_kv(v_full, self.num_heads, self.num_kv_groups)
 
-    def forward(self, x, offset=0):
-        h = self.attn_norm(x)
-        h = self.attention(h, offset)
-        if self.use_sandwich_norm:
-            h = self.attn_norm_out(h)
-        x = x + h
+        q = q_new.transpose(1, 2)
+        k = k_exp.transpose(1, 2)
+        v = v_exp.transpose(1, 2)
 
-        h = self.ffn_norm(x)
-        h = self.ffn(h)
-        if self.use_sandwich_norm:
-            h = self.ffn_norm_out(h)
-        x = x + h
+        S_full = k.shape[2]
+        att_output = F.scaled_dot_product_attention(
+            q, k, v,
+            is_causal=True,
+        )
+
+        att_output = att_output.transpose(1, 2).contiguous().view(B, S_new, D)
+        return self.o_proj(att_output), new_cache
+
+
+class MLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.fc1 = nn.Linear(config.dim, 2 * config.ffn_dim, bias=False)
+        self.fc2 = nn.Linear(config.ffn_dim, config.dim, bias=False)
+        self.dropout = nn.Dropout(config.drop)
+        self.fc2.is_residual_proj = True
+
+    def forward(self, x):
+        x = self.fc1(x)
+        x, gate = x.chunk(2, dim=-1)
+        x = x * F.silu(gate)
+        return self.dropout(self.fc2(x))
+
+
+class Block(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.ln_1 = nn.RMSNorm(config.dim)
+        self.attn = Attention(config)
+        self.ln_2 = nn.RMSNorm(config.dim)
+        self.mlp = MLP(config)
+
+    def forward(self, x):
+        x = x + self.attn(self.ln_1(x))
+        x = x + self.mlp(self.ln_2(x))
         return x
 
     def forward_with_cache(self, x, offset, cache):
-        h = self.attn_norm(x)
-        h, new_cache = self.attention.forward_with_cache(h, offset, cache)
-        if self.use_sandwich_norm:
-            h = self.attn_norm_out(h)
+        h = self.ln_1(x)
+        h, new_cache = self.attn.forward_with_cache(h, offset, cache)
         x = x + h
-
-        h = self.ffn_norm(x)
-        h = self.ffn(h)
-        if self.use_sandwich_norm:
-            h = self.ffn_norm_out(h)
-        x = x + h
+        x = x + self.mlp(self.ln_2(x))
         return x, new_cache
 
 
-class Transformer(nn.Module):
-    def __init__(self, num_layers, d_model, num_heads, num_kv_groups=0,
-                 head_dim=None, ffn_expansion=4.0, use_swiglu=True,
-                 max_seq_len=2048, rope_base=10000.0, rope_scaling=1.0,
-                 causal=True, dropout=0.0, ffn_dropout=0.0,
-                 attn_logit_cap=None, bias=False, norm_eps=1e-5,
-                 ffn_round_to=64, use_xsa=False, qk_norm=True,
-                 use_sandwich_norm=False, rotary_pct=1.0):
+class LLM(nn.Module):
+    def __init__(self, config: Config):
         super().__init__()
-        if num_kv_groups == 0:
-            num_kv_groups = num_heads
-        if head_dim is None:
-            head_dim = d_model // num_heads
+        self.config = config
 
-        self.layers = nn.ModuleList([
-            TransformerLayer(
-                d_model=d_model, num_heads=num_heads, num_kv_groups=num_kv_groups,
-                head_dim=head_dim, max_seq_len=max_seq_len, rope_base=rope_base,
-                rope_scaling=rope_scaling, causal=causal, dropout=dropout,
-                ffn_dropout=ffn_dropout, attn_logit_cap=attn_logit_cap,
-                bias=bias, norm_eps=norm_eps, ffn_expansion=ffn_expansion,
-                use_swiglu=use_swiglu, ffn_round_to=ffn_round_to,
-                use_xsa=use_xsa, qk_norm=qk_norm,
-                use_sandwich_norm=use_sandwich_norm,
-                rotary_pct=rotary_pct,
+        self.embeddings = nn.Embedding(config.emb_num, config.dim)
+        self.blocks = nn.ModuleList([Block(config) for _ in range(config.layers)])
+        self.norm_f = nn.RMSNorm(config.dim)
+
+        self.lm_head = nn.Linear(config.dim, config.emb_num, bias=False)
+        self.embeddings.weight = self.lm_head.weight
+
+        self.apply(self._init_weights)
+        print("Number of parameters: %.2fM" % (sum(p.numel() for p in self.parameters()) / 1e6,))
+
+    @torch.no_grad()
+    def _init_weights(self, module):
+        n_layer = self.config.layers
+
+        if isinstance(module, nn.Linear):
+            if module is self.lm_head:
+                return
+
+            w_fan_in = module.weight.shape[-1]
+            base_std = (1.0 / w_fan_in) ** 0.5
+
+            if hasattr(module, 'is_residual_proj'):
+                final_std = base_std / math.sqrt(2 * n_layer)
+            elif hasattr(module, 'is_attention'):
+                final_std = base_std * 0.7
+            else:
+                final_std = base_std
+
+            torch.nn.init.trunc_normal_(
+                module.weight, mean=0.0, std=final_std, a=-2*final_std, b=2*final_std
             )
-            for _ in range(num_layers)
-        ])
-        self.final_norm = RMSNorm(d_model, eps=norm_eps)
 
-    def forward(self, x, offset=0):
-        for layer in self.layers:
-            x = layer(x, offset)
-        return self.final_norm(x)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
 
-    def forward_with_cache(self, x, offset, caches):
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.trunc_normal_(
+                module.weight, mean=0.0, std=0.02, a=-0.04, b=0.04
+            )
+
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": nodecay_params, "weight_decay": 0.0},
+        ]
+        fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == "cuda"
+        extra_args = dict(fused=True) if use_fused else dict()
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        print(f"using fused AdamW: {use_fused}")
+        return optimizer
+
+    def forward(self, input_ids, labels=None):
+        x = self.embeddings(input_ids)
+
+        for block in self.blocks:
+            x = block(x)
+
+        x = self.norm_f(x)
+        logits = self.lm_head(x)
+
+        loss = None
+        if labels is not None:
+            shift_logits = logits[:, :-1, :].contiguous()
+            shift_labels = labels[:, 1:].contiguous()
+            loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.0, reduction="mean")
+            loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+            )
+
+        return logits, loss
+
+    def forward_with_cache(self, input_ids, offset, caches):
+        x = self.embeddings(input_ids)
         new_caches = []
-        for i, layer in enumerate(self.layers):
+        for i, block in enumerate(self.blocks):
             cache = caches[i] if caches is not None and i < len(caches) else None
-            x, new_cache = layer.forward_with_cache(x, offset, cache)
+            x, new_cache = block.forward_with_cache(x, offset, cache)
             new_caches.append(new_cache)
-        return x, new_caches
-
-
-class TransformerLM(nn.Module):
-    def __init__(self, vocab_size, d_model, num_layers, num_heads,
-                 num_kv_groups=0, head_dim=None, ffn_expansion=4.0,
-                 use_swiglu=True, use_x0=False, max_seq_len=2048,
-                 rope_base=10000.0, rope_scaling=1.0, causal=True,
-                 attn_dropout=0.0, ffn_dropout=0.0, residual_dropout=0.0,
-                 attn_logit_cap=None, bias=False, norm_eps=1e-5,
-                 ffn_round_to=64, use_xsa=False, qk_norm=True,
-                 use_sandwich_norm=False, noise_std=0.0,
-                 use_mla=False, use_moe=False, use_gated_attn=False,
-                 gated_type="headwise", use_bma=False, cache_every=1,
-                 mla_d_c=None, mla_d_c1=None, mla_d_rotate=None,
-                 mla_block_size=128, rotary_pct=1.0):
-        super().__init__()
-        self.vocab_size = vocab_size
-        self.d_model = d_model
-
-        self.embedding = nn.Embedding(vocab_size, d_model)
-        nn.init.normal_(self.embedding.weight, mean=0, std=0.02)
-
-        self.transformer = Transformer(
-            num_layers=num_layers, d_model=d_model, num_heads=num_heads,
-            num_kv_groups=num_kv_groups, head_dim=head_dim,
-            ffn_expansion=ffn_expansion, use_swiglu=use_swiglu,
-            max_seq_len=max_seq_len, rope_base=rope_base,
-            rope_scaling=rope_scaling, causal=causal,
-            dropout=attn_dropout, ffn_dropout=ffn_dropout,
-            attn_logit_cap=attn_logit_cap, bias=bias, norm_eps=norm_eps,
-            ffn_round_to=ffn_round_to, use_xsa=use_xsa, qk_norm=qk_norm,
-            use_sandwich_norm=use_sandwich_norm,
-            rotary_pct=rotary_pct,
-        )
-
-        self.head = nn.Linear(d_model, vocab_size, bias=False)
-        self.head.emb_weight = self.embedding.weight
-        self.head.weight = self.embedding.weight
-
-        self.use_x0 = use_x0
-        self.noise_std = noise_std
-
-    def forward(self, x):
-        h = self.embedding(x)
-        if self.training and self.noise_std > 0:
-            h = h + torch.randn_like(h) * self.noise_std
-        h = self.transformer(h, 0)
-        logits = self.head(h)
-        return logits, 0.0
-
-    def forward_with_cache(self, x, offset, caches):
-        h = self.embedding(x)
-        h, new_caches = self.transformer.forward_with_cache(h, offset, caches)
-        logits = self.head(h)
+        x = self.norm_f(x)
+        logits = self.lm_head(x)
         return logits, new_caches
 
     @torch.no_grad()
-    def generate(self, x, max_new_tokens=100, temperature=0.8, top_k=50,
+    def generate(self, input_ids, max_new_tokens=100, temperature=0.8, top_k=50,
                  top_p=0.9, repetition_penalty=1.1):
         caches = None
-        prompt_len = x.shape[1]
+        prompt_len = input_ids.shape[1]
 
         for i in range(prompt_len):
-            logits, caches = self.forward_with_cache(x[:, i:i+1], i, caches)
+            logits, caches = self.forward_with_cache(input_ids[:, i:i+1], i, caches)
 
         for gen_i in range(max_new_tokens):
             logits_last = logits[:, -1, :] / temperature
 
             if repetition_penalty != 1.0:
-                for tok in x[0].unique():
+                for tok in input_ids[0].unique():
                     if logits_last[0, tok] > 0:
                         logits_last[0, tok] /= repetition_penalty
                     else:
@@ -239,7 +274,7 @@ class TransformerLM(nn.Module):
 
             probs = torch.softmax(logits_last, dim=-1)
             next_tok = torch.multinomial(probs, num_samples=1)
-            x = torch.cat([x, next_tok], dim=1)
-            logits, caches = self.forward_with_cache(next_tok, prompt_len + gen_i , caches)
+            input_ids = torch.cat([input_ids, next_tok], dim=1)
+            logits, caches = self.forward_with_cache(next_tok, prompt_len + gen_i, caches)
 
-        return x
+        return input_ids

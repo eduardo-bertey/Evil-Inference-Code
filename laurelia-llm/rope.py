@@ -1,10 +1,7 @@
-"""Rotary Position Embeddings (RoPE) compatible with Rust blocks::trasformer::rope.
+"""Rotary Position Embeddings (RoPE) — parcial.
 
-Supports:
-  - Standard full RoPE (100%)
-  - Partial RoPE (rotary_pct < 1.0) — e.g. Kimi K2, Phi-2
-  - NTK-aware scaling
-  - Precomputed cos/sin cache
+Soporta RoPE parcial (rotary_pct) para rotar solo una fracción de head_dim.
+Compatible con inferencia KV cache via offset.
 """
 
 import math
@@ -13,174 +10,90 @@ import torch.nn as nn
 
 
 class RoPE(nn.Module):
-    """Precomputed Rotary Position Embeddings.
+    """RoPE con soporte parcial.
 
-    Matches Rust RoPEConfig / RoPE struct.
+    Args:
+        head_dim: dimensión de cada head (debe ser par)
+        max_seq_len: longitud máxima precomputada
+        base: frecuencia base
+        rotary_pct: fracción de dims a rotar (0.0-1.0). 1.0 = full RoPE.
     """
 
-    def __init__(
-        self,
-        head_dim: int,
-        max_seq_len: int = 2048,
-        base: float = 10000.0,
-        scaling_factor: float = 1.0,
-    ):
+    def __init__(self, head_dim, max_seq_len=2048, base=10000.0, rotary_pct=1.0):
         super().__init__()
-        assert head_dim % 2 == 0, f"RoPE head_dim must be even, got {head_dim}"
-
+        assert head_dim % 2 == 0
         self.head_dim = head_dim
         self.max_seq_len = max_seq_len
+        self.base = base
+        self.rotary_pct = rotary_pct
 
-        half_dim = head_dim // 2
-        scaled_base = base * scaling_factor
+        if rotary_pct >= 1.0:
+            self.rotary_dim = head_dim
+        else:
+            self.rotary_dim = int(head_dim * rotary_pct)
+            self.rotary_dim = self.rotary_dim - (self.rotary_dim % 2)
+        self.rotary_half = self.rotary_dim // 2
 
-        # theta_k = base^(-2k/d) for k = 0..half_dim
-        inv_freq = torch.tensor(
-            [1.0 / (scaled_base ** (2.0 * k / head_dim)) for k in range(half_dim)],
-            dtype=torch.float32,
-        )
+        inv_freq = 1.0 / (base ** (torch.arange(0, self.rotary_half).float() / self.rotary_dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-        # Precompute cos/sin cache: (max_seq_len, half_dim)
-        positions = torch.arange(0, max_seq_len, dtype=torch.float32)
-        freqs = torch.outer(positions, inv_freq)  # (max_seq_len, half_dim)
-        self.register_buffer("cos_cache", freqs.cos(), persistent=False)
-        self.register_buffer("sin_cache", freqs.sin(), persistent=False)
+        self._build_cache(max_seq_len)
 
-    def forward(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        offset: int = 0,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Apply RoPE to Q and K tensors.
+    def _build_cache(self, seq_len):
+        t = torch.arange(seq_len, device=self.inv_freq.device, dtype=torch.float32)
+        freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+        self.register_buffer("cos_cached", freqs.cos(), persistent=False)
+        self.register_buffer("sin_cached", freqs.sin(), persistent=False)
+
+    def forward(self, q, k, offset=0):
+        """Aplica RoPE parcial a Q y K.
 
         Args:
             q: (batch, seq_len, num_heads, head_dim)
             k: (batch, seq_len, num_kv_groups, head_dim)
-            offset: starting position index
-
+            offset: posición inicial
         Returns:
-            (q_rotated, k_rotated) same shapes
+            (q_rotated, k_rotated)
         """
+        if self.rotary_dim == 0:
+            return q, k
+
         seq_len = q.shape[1]
-        half_dim = self.head_dim // 2
-        offset = int(offset)
+        end = offset + seq_len
 
-        if offset + seq_len <= self.max_seq_len:
-            cos = self.cos_cache[offset:offset + seq_len, :half_dim].unsqueeze(0).unsqueeze(2)
-            sin = self.sin_cache[offset:offset + seq_len, :half_dim].unsqueeze(0).unsqueeze(2)
-        else:
-            positions = torch.arange(offset, offset + seq_len, dtype=torch.float32, device=q.device)
-            freqs = torch.outer(positions, self.inv_freq[:half_dim])
-            cos = freqs.cos().unsqueeze(0).unsqueeze(2)
-            sin = freqs.sin().unsqueeze(0).unsqueeze(2)
+        if end > self.max_seq_len:
+            self._build_cache(end)
+            self.max_seq_len = end
 
-        q_rot = self._apply_rotation(q, cos, sin)
-        k_rot = self._apply_rotation(k, cos, sin)
-        return q_rot, k_rot
+        cos = self.cos_cached[offset:end].unsqueeze(0).unsqueeze(2)
+        sin = self.sin_cached[offset:end].unsqueeze(0).unsqueeze(2)
 
-    def apply_to_single(self, x: torch.Tensor, offset: int = 0) -> torch.Tensor:
-        """Apply RoPE to a single tensor."""
-        seq_len = x.shape[1]
-        half_dim = self.head_dim // 2
-        if offset + seq_len <= self.max_seq_len:
-            cos = self.cos_cache[offset:offset + seq_len, :half_dim].unsqueeze(0).unsqueeze(2)
-            sin = self.sin_cache[offset:offset + seq_len, :half_dim].unsqueeze(0).unsqueeze(2)
-        else:
-            positions = torch.arange(offset, offset + seq_len, dtype=torch.float32, device=x.device)
-            freqs = torch.outer(positions, self.inv_freq[:half_dim])
-            cos = freqs.cos().unsqueeze(0).unsqueeze(2)
-            sin = freqs.sin().unsqueeze(0).unsqueeze(2)
-        return self._apply_rotation(x, cos, sin)
+        q_out = self._rotate_partial(q, cos, sin)
+        k_out = self._rotate_partial(k, cos, sin)
+        return q_out, k_out
+
+    def _rotate_partial(self, x, cos, sin):
+        """Rotea solo las primeras rotary_dim dimensiones, el resto pasa sin cambio."""
+        rd = self.rotary_dim
+        hh = self.rotary_half
+
+        q_rot = x[..., :rd]
+        q_pass = x[..., rd:]
+
+        qr_first = q_rot[..., :hh]
+        qr_second = q_rot[..., hh:rd]
+
+        q_rotated = torch.cat([
+            qr_first * cos - qr_second * sin,
+            qr_first * sin + qr_second * cos,
+        ], dim=-1)
+
+        return torch.cat([q_rotated, q_pass], dim=-1)
 
     @staticmethod
-    def _apply_rotation(
-        x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
-    ) -> torch.Tensor:
-        """Core rotation: split into even/odd pairs, rotate.
-
-        x_rot[..., 2k]   = x[..., 2k] * cos[k] - x[..., 2k+1] * sin[k]
-        x_rot[..., 2k+1] = x[..., 2k] * sin[k] + x[..., 2k+1] * cos[k]
-        """
-        half_dim = x.shape[-1] // 2
-        x_first = x[..., :half_dim]
-        x_second = x[..., half_dim:]
-
-        out_first = x_first * cos - x_second * sin
-        out_second = x_first * sin + x_second * cos
-        return torch.cat([out_first, out_second], dim=-1)
-
-
-def apply_rope_partial(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    offset: int,
-    rotary_pct: float,
-    inv_freq: torch.Tensor,
-    cos_cache: torch.Tensor,
-    sin_cache: torch.Tensor,
-    head_dim: int,
-    max_seq_len: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Apply RoPE to only `rotary_pct` of head dimensions.
-
-    Compatible with Rust apply_rope_partial.
-    First rotary_dim dimensions are rotated; rest pass through unchanged.
-
-    Args:
-        q: (batch, seq_len, num_heads, head_dim)
-        k: (batch, seq_len, num_kv_groups, head_dim)
-        offset: starting position
-        rotary_pct: fraction of head_dim to rotate (0.0 - 1.0)
-        inv_freq, cos_cache, sin_cache: from RoPE module buffers
-        head_dim, max_seq_len: configuration
-    """
-    rotary_dim = int(head_dim * rotary_pct)
-    rotary_dim = rotary_dim - (rotary_dim % 2)  # round to even
-
-    if rotary_dim == 0:
-        return q, k
-    if rotary_dim >= head_dim:
-        # Full rotation
-        seq_len = q.shape[1]
-        half_dim = head_dim // 2
-        if offset + seq_len <= max_seq_len:
-            cos = cos_cache[offset:offset + seq_len, :half_dim].unsqueeze(0).unsqueeze(2)
-            sin = sin_cache[offset:offset + seq_len, :half_dim].unsqueeze(0).unsqueeze(2)
-        else:
-            positions = torch.arange(offset, offset + seq_len, dtype=torch.float32, device=q.device)
-            freqs = torch.outer(positions, inv_freq[:half_dim])
-            cos = freqs.cos().unsqueeze(0).unsqueeze(2)
-            sin = freqs.sin().unsqueeze(0).unsqueeze(2)
-        return RoPE._apply_rotation(q, cos, sin), RoPE._apply_rotation(k, cos, sin)
-
-    seq_len = q.shape[1]
-    hh = rotary_dim // 2
-    offset = int(offset)
-
-    cos = cos_cache[offset:offset + seq_len, :hh].unsqueeze(0).unsqueeze(2)
-    sin = sin_cache[offset:offset + seq_len, :hh].unsqueeze(0).unsqueeze(2)
-
-    # Split into rotated and pass-through parts
-    q_rot = q[..., :rotary_dim]
-    q_pass = q[..., rotary_dim:]
-    qr_first = q_rot[..., :hh]
-    qr_second = q_rot[..., hh:rotary_dim]
-    q_rotated = torch.cat([
-        qr_first * cos - qr_second * sin,
-        qr_first * sin + qr_second * cos,
-    ], dim=-1)
-    q_out = torch.cat([q_rotated, q_pass], dim=-1)
-
-    k_rot = k[..., :rotary_dim]
-    k_pass = k[..., rotary_dim:]
-    kr_first = k_rot[..., :hh]
-    kr_second = k_rot[..., hh:rotary_dim]
-    k_rotated = torch.cat([
-        kr_first * cos - kr_second * sin,
-        kr_first * sin + kr_second * cos,
-    ], dim=-1)
-    k_out = torch.cat([k_rotated, k_pass], dim=-1)
-
-    return q_out, k_out
+    def _apply_rotation(x, cos, sin):
+        """RoPE full (100%)."""
+        half = x.shape[-1] // 2
+        x1 = x[..., :half]
+        x2 = x[..., half:]
+        return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)

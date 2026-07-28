@@ -1,16 +1,14 @@
-"""Laurelia LLM Train: Dense + XSA, sin MLA.
+"""Laurelia LLM Train — Dense GQA, basado en LLM_350M_DENSE.
 
-Arquitectura: GQA standard + XSA (orthogonal projection removal)
-en TODAS las capas. Sin MLA, sin BMA, sin Gated. Dense.
+bf16, streaming dataset, AdamW fused, WSD schedule, HF upload.
 """
 
 import sys, os, time, math, inspect, torch
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-import torch.nn.functional as F
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
-from model import TransformerLM
+from model import LLM, Config
 from dataset import download_wikipedia_50mb, StreamingDataset
 from huggingface import HFManager, PeriodicPusher
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
@@ -49,47 +47,21 @@ def train_tokenizer_from_wiki(vocab_size, output_path):
     return output_path
 
 
-def get_lr(step, total, warmup, lr):
-    if step < warmup:
-        return lr * (step + 1) / max(warmup, 1)
-    t = (step - warmup) / max(total - warmup, 1)
-    return lr * (0.2 + 0.8 * (1.0 + math.cos(math.pi * t)) / 2.0)
+def get_wsd_schedule(optimizer, num_warmup, num_stable, num_decay, min_lr_ratio=0.1):
+    def lr_lambda(step):
+        if step < num_warmup:
+            return float(step) / float(max(1, num_warmup))
+        if step < num_warmup + num_stable:
+            return 1.0
+        progress = float(step - num_warmup - num_stable) / float(max(1, num_decay))
+        progress = min(1.0, progress)
+        return min_lr_ratio + (1.0 - min_lr_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
-# ─── Config Laurelia LLM (Dense + XSA) ────────────────────────────────────────
-d_model = 768
-num_layers = 24
-num_heads = 12
-num_kv_groups = 4
-head_dim = d_model // num_heads
-seq_len = 980
-max_seq_len = 65536
-batch_size = 4
-grad_accum = 12
-lr = 25e-5
-num_epochs = 200000
-warmup_steps = 50
-bpe_vocab = 32000
-
-# Dense GQA + XSA (sin MLA, sin BMA, sin Gated)
-use_mla = False
-use_xsa = False
-qk_norm = True
-use_sandwich_norm = True
-noise_std = 0.01
-
-# Dense only (sin MoE)
-use_moe = False
-
-# FFN
-dense_dim = None
-
-# Data Mix
-mezcla = True
-
-plot_interval = 256
-
+config = Config()
 tok_path = os.path.join(_DIR, "tokenizer.json")
+plot_interval = 256
 
 
 def main():
@@ -99,7 +71,6 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    # ── HF ──────────────────────────────────────────────────────────────────
     repo_id = "ScortexIA/laurelia"
     revision = "laurelia-llm"
     hf = pusher = None
@@ -109,30 +80,9 @@ def main():
         pusher = PeriodicPusher(hf, interval_minutes=20)
     pm = PlotManager(hf if not test_mode else None, save_dir=_DIR, plot_interval=plot_interval)
 
-    # ── Precision: FP16 ─────────────────────────────────────────────────────
-    amp = False
-    if test_mode:
-        dtype = torch.float32
-    else:
-        prec = input("Precision (n=f32, f=f16, b=bf16, a=amp(f16+master-f32)): ").strip().lower()
-        if prec == "b":
-            dtype = torch.bfloat16
-        elif prec == "f":
-            dtype = torch.float16
-        elif prec == "a":
-            dtype = torch.float16
-            amp = True
-        else:
-            dtype = torch.float32
-    scaler = torch.amp.GradScaler("cuda", enabled=amp) if device.type == "cuda" else torch.amp.GradScaler("cpu", enabled=amp)
-    master = "f32 (master)" if amp else str(dtype)
-    print(f"  Compute: {dtype}  |  Weights: {master}  |  AMP: {amp}")
+    dtype = torch.bfloat16
+    print(f"  Compute: {dtype}")
 
-    # ── Attention: Dense GQA + XSA ────────────────────────────────────────
-    print(f"  Attention: GQA+XSA (dense)")
-    print(f"  Dense only (no MoE) | {num_layers} capas")
-
-    # ── Tokenizer ──────────────────────────────────────────────────────────
     tokenizer = None
     if os.path.exists(tok_path):
         tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
@@ -144,50 +94,22 @@ def main():
             pass
     if tokenizer is None:
         if hf:
-            train_tokenizer_from_wiki(bpe_vocab, tok_path)
+            train_tokenizer_from_wiki(config.emb_num, tok_path)
             tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
             hf.upload_tokenizer(tok_path, os.path.join(_DIR, "tokenizer_config.json"))
         else:
             sys.exit("No tokenizer found")
+    config.emb_num = tokenizer.vocab_size
     print(f"Vocab: {tokenizer.vocab_size}")
 
-    # ── Model ───────────────────────────────────────────────────────────────
-    if dense_dim is not None:
-        ffn_expansion = dense_dim * 3.0 / 2.0 / d_model
-    else:
-        ffn_expansion = 4.0
+    model = LLM(config).to(device).to(dtype=dtype)
 
-    model = TransformerLM(
-        vocab_size=tokenizer.vocab_size, d_model=d_model, num_layers=num_layers,
-        num_heads=num_heads, num_kv_groups=num_kv_groups, head_dim=head_dim,
-        use_swiglu=True, use_x0=False, max_seq_len=max_seq_len, rotary_pct=0.25,
-        ffn_expansion=ffn_expansion,
-        residual_dropout=0.0, attn_dropout=0.0, ffn_dropout=0.0,
-        use_mla=use_mla, use_xsa=use_xsa, qk_norm=qk_norm,
-        attn_logit_cap=30, use_sandwich_norm=use_sandwich_norm, noise_std=noise_std,
-        use_moe=False, cache_every=1,
-    ).to(device).to(dtype=dtype)
+    optimizer = model.configure_optimizers(config.weight_decay, config.learning_rate, config.betas, "cuda")
 
-    # Weight decay groups
-    emb_params = [model.embedding.weight]
-    other_decay_params = [p for n, p in model.named_parameters() if p.dim() >= 2 and p.requires_grad and 'embedding' not in n]
-    nodecay_params = [p for n, p in model.named_parameters() if p.dim() < 2 and p.requires_grad]
-    optim_groups = [
-        {"params": emb_params, "weight_decay": 0.01, "lr_scale": 0.25},
-        {"params": other_decay_params, "weight_decay": 0.01},
-        {"params": nodecay_params, "weight_decay": 0.0},
-    ]
-    fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
-    use_fused = fused_available and device.type == "cuda"
-    opt = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), fused=use_fused)
-    print(f"Optimizer: AdamW fused={use_fused}")
-    print(f"  decay={len(other_decay_params)} param tensors, emb_lr=lr/4, nodecay={len(nodecay_params)}")
-
-    # ── Checkpoint ─────────────────────────────────────────────────────────
+    ckpt_path = os.path.join(_DIR, "checkpoint.pt")
     step = 0
     epoch = 0
     ckpt_block = 0
-    ckpt_path = os.path.join(_DIR, "checkpoint.pt")
 
     if not test_mode:
         loaded = False
@@ -216,66 +138,66 @@ def main():
 
         if loaded:
             print("\n── Generation test ──")
-            for p in ["hola", "que es la inteligencia artificial", "en un lugar de la mancha", "hoy hace mucho calor"]:
+            for p in ["hola", "que es la inteligencia artificial", "en un lugar de la mancha"]:
                 sample = generate_sample(model, tokenizer, device, prompt=p, max_new=50)
                 print(f"  [{p}] → {sample}")
             print("── End test ──\n")
 
-    # ── Data ────────────────────────────────────────────────────────────────
     if test_mode:
         with open(txt_path, "r", encoding="utf-8") as f:
             all_tokens = tokenizer.encode(f.read())
         n = len(all_tokens)
-        epochs_do = 10
-        total_steps = ((n - seq_len - 1) // (batch_size * seq_len)) * epochs_do
+        total_steps = ((n - config.block_size - 1) // (config.batch_size * config.block_size)) * 10
+        seq_len = config.block_size
     else:
         bi = input(f"Block [{ckpt_block}]: ").strip()
         block_idx = int(bi) if bi else ckpt_block
-        sd = StreamingDataset(block_mb=3.0, block_idx=block_idx, mezcla=mezcla)
-        print(f"Mix {'enabled' if mezcla else 'disabled'} (FineWeb2-HQ)")
+        sd = StreamingDataset(block_mb=3.0, block_idx=block_idx, mezcla=True)
         sd.load_tokens(tokenizer)
-        n = len(sd.get_tokens())
-        tokens_per_epoch = (n - seq_len - 1) // seq_len
-        total_steps = (tokens_per_epoch // batch_size) * num_epochs
-        epochs_do = num_epochs
+        tokens = sd.get_tokens()
+        n = len(tokens)
+        seq_len = config.block_size
+        n_seq = (n - seq_len - 1) // seq_len
+        steps_per_epoch = n_seq // config.batch_size
+        total_steps = steps_per_epoch * 200000
+        epochs_do = 200000
 
-    # ── Stats ──────────────────────────────────────────────
-    emb_p = model.embedding.weight.numel()
-    layer_p = sum(p.numel() for l in model.transformer.layers for p in l.parameters())
-    norm_p = model.transformer.final_norm.weight.numel()
-    total_p = emb_p + layer_p + norm_p
-    print(f"Params: emb={emb_p:,} + {num_layers}capas={layer_p:,} + norm={norm_p} = {total_p:,}")
-    print(f"dim={d_model} lay={num_layers} heads={num_heads} kv={num_kv_groups} seq={seq_len} bs={batch_size} ga={grad_accum} lr={lr}")
-    print(f"GQA+XSA: {num_kv_groups}kv groups | XSA enabled")
-    print(f"Tokens: {n:,} | Steps total: {total_steps}")
+    num_warmup = config.warm_up
+    num_decay = int(total_steps * 0.15)
+    num_stable = total_steps - num_warmup - num_decay
+    scheduler = get_wsd_schedule(optimizer, num_warmup, num_stable, num_decay)
 
-    # ── Train loop ──────────────────────────────────────────────────────────
+    emb_p = model.embeddings.weight.numel()
+    layer_p = sum(p.numel() for b in model.blocks for p in b.parameters())
+    norm_p = model.norm_f.weight.numel()
+    head_p = model.lm_head.weight.numel()
+    print(f"Params: emb={emb_p:,} + {config.layers}capas={layer_p:,} + norm={norm_p} = {emb_p + layer_p + norm_p:,}")
+    print(f"dim={config.dim} lay={config.layers} heads={config.heads} kv={config.kv_groups} seq={seq_len} bs={config.batch_size} ga={config.grad_acc} lr={config.learning_rate}")
+    print(f"Tokens: {n:,}")
+
     model.train()
     t0 = time.time()
     last_rpt_time = t0
     last_rpt_step = 0
 
-    epoch = 0
-    torch.cuda.empty_cache()
     while True:
         if test_mode:
             tokens = all_tokens
+            n_seq = (len(tokens) - seq_len - 1) // seq_len
         else:
             tokens = sd.get_tokens()
+            n_seq = (len(tokens) - seq_len - 1) // seq_len
 
-        n_seq = (len(tokens) - seq_len - 1) // seq_len
         if n_seq <= 0:
-            print(f"Block too small ({len(tokens)} tokens), skipping epoch {epoch}")
             epoch += 1
-            if epoch >= epochs_do:
-                break
+            if not test_mode:
+                sd.next_block()
             continue
 
-        micro = 0
-        for batch_start in range(0, n_seq, batch_size):
+        for batch_start in range(0, n_seq, config.batch_size):
             if step >= total_steps:
                 break
-            batch_end = min(batch_start + batch_size, n_seq)
+            batch_end = min(batch_start + config.batch_size, n_seq)
             x_list, y_list = [], []
             for i in range(batch_start, batch_end):
                 idx = i * seq_len
@@ -286,69 +208,32 @@ def main():
             x = torch.cat(x_list, dim=0)
             y = torch.cat(y_list, dim=0)
 
-            if micro == 0:
-                lr_curr = get_lr(step, total_steps, warmup_steps, lr)
-                for pg in opt.param_groups:
-                    pg["lr"] = lr_curr * pg.get("lr_scale", 1.0)
-                opt.zero_grad()
-
-            logits, aux_loss = model(x)
-            loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
-            (loss / grad_accum).backward()
+            logits, loss = model(x, labels=y)
+            (loss / config.grad_acc).backward()
             loss_val = loss.item()
             del logits, loss
-            micro += 1
 
-            if micro >= grad_accum:
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
+            if (batch_start // config.batch_size + 1) % config.grad_acc == 0 or batch_end >= n_seq:
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
-                if step % 10 == 0:
-                    layer_grads = {}
-                    for name, param in model.named_parameters():
-                        if param.grad is None:
-                            continue
-                        g = param.grad
-                        parts = name.split('.')
-                        if len(parts) > 2 and parts[0] == 'transformer' and parts[1] == 'layers':
-                            layer_key = f"L{parts[2]}"
-                        elif parts[0] == 'transformer' and parts[1] == 'head':
-                            layer_key = 'head'
-                        else:
-                            layer_key = parts[0]
-                        if layer_key not in layer_grads:
-                            layer_grads[layer_key] = []
-                        layer_grads[layer_key].append(g.norm().item())
-
-                    layer_norms = []
-                    for layer_key, norms in layer_grads.items():
-                        avg_norm = sum(norms) / len(norms)
-                        layer_norms.append((layer_key, avg_norm))
-                    layer_norms.sort(key=lambda x: x[1], reverse=True)
-
-                    grad_report = " | ".join(
-                        f"{k}={v:.3g}" for k, v in layer_norms
-                    )
-                    print(f"  Grad norms: {grad_report}")
-
-                opt.step()
-                opt.zero_grad()
+                lr_curr = scheduler.get_last_lr()[0]
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad()
                 step += 1
-                micro = 0
 
                 if step % 10 == 0:
                     now = time.time()
-                    tok = (step - last_rpt_step) * batch_size * grad_accum * seq_len
+                    tok = (step - last_rpt_step) * config.batch_size * config.grad_acc * seq_len
                     tps = tok / max(now - last_rpt_time, 0.001)
-                    print(f"e{epoch} s{step} loss {loss_val:.4f} lr {lr_curr:.6f} {tps:.0f}t/s")
+                    print(f"s{step} loss {loss_val:.4f} lr {lr_curr:.6f} grad {grad_norm:.3f} {tps:.0f}t/s")
                     last_rpt_time = now
                     last_rpt_step = step
                     pm.log(step, loss_val, lr_curr, tps)
 
                 if not test_mode and step % 50 == 0:
-                    t_gen = time.time()
                     sample = generate_sample(model, tokenizer, device)
-                    gen_tps = 100 / (time.time() - t_gen)
-                    print(f"  >>> {sample}  [{gen_tps:.0f} tok/s]")
+                    print(f"  >>> {sample}")
 
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
                     state = model.state_dict()
@@ -359,26 +244,12 @@ def main():
                     pm.plot(step)
                     pm.upload(step)
 
-        if micro > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
-            opt.step()
-            opt.zero_grad()
-            step += 1
-            micro = 0
-
         epoch += 1
-        print(f"── Epoch {epoch} done: {step} steps ──")
-        if epoch >= epochs_do:
-            break
-
         if not test_mode:
-            tokens = None
             sd.next_block()
-            total_tokens = len(sd.get_tokens())
-            n_seq = (total_tokens - seq_len - 1) // seq_len
 
     if not test_mode and hf:
-        ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx, "model": model.state_dict()}
+        ckpt = {"step": step, "epoch": epoch, "model": model.state_dict()}
         torch.save(ckpt, ckpt_path)
         hf.upload_checkpoint(ckpt_path, tok_path, step)
 
