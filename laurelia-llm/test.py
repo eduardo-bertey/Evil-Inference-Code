@@ -71,46 +71,91 @@ expected = 1.0 / (10000.0 ** (torch.arange(rotary_half).float() * 2.0 / head_dim
 check("inv_freq fórmula correcta", torch.allclose(rope.inv_freq, expected, atol=1e-12))
 
 # ============================================================
-print("\n=== Attention (forward vs forward_with_cache) ===")
-attn = Attention(cfg)
-attn.eval()
+print("\n=== Attention DEBUG: step-by-step comparison ===")
+# Crear dos attn IDENTICAS (clonando pesos)
+attn_a = Attention(cfg)
+attn_a.eval()
+attn_b = Attention(cfg)
+attn_b.eval()
+attn_b.load_state_dict(attn_a.state_dict())
 
-x = torch.randn(B, S, cfg.dim)
+x_single = torch.randn(B, 1, cfg.dim)
+x_double = torch.randn(B, 2, cfg.dim)
 
-# Con S=1, forward_with_cache(is_causal=False) = forward(is_causal=True)
-x1 = x[:, :1, :]
-out_fwd1, _ = attn(x1)
-out_cache1, cache1 = attn.forward_with_cache(x1, offset=0, cache=None)
-check("attn single token: forward == forward_with_cache",
-      torch.allclose(out_fwd1, out_cache1, atol=1e-5))
+# forward en attn_a
+out_fwd, _ = attn_a(x_single)
+# forward_with_cache en attn_b
+out_cache, cache = attn_b.forward_with_cache(x_single, offset=0, cache=None)
 
-# Con S>1 y cache=None, forward_with_cache usa is_causal=True → mismo resultado
-out_fwd4, _ = attn(x)
-out_cache4, _ = attn.forward_with_cache(x, offset=0, cache=None)
-diff = maxdiff(out_fwd4, out_cache4)
-check("attn multi token: forward == forward_with_cache (is_causal cuando cache=None)",
-      torch.allclose(out_fwd4, out_cache4, atol=1e-4), f"maxdiff={diff:.2e}")
+d = maxdiff(out_fwd, out_cache)
+print(f"  attn_a(x) vs attn_b.forward_with_cache(x,0,None): maxdiff={d:.2e}")
+print(f"  PASS={d < 1e-5}")
 
-cache_len = cache1[0].shape[1]
-check("cache length == S", cache_len == 1)
+# Comparar internals: q, k, v antes de SDPA
+with torch.no_grad():
+    # forward path
+    B1, T1, D1 = x_single.shape
+    q1 = attn_a.q_proj(x_single).view(B1, T1, attn_a.num_heads, attn_a.head_dim)
+    k1 = attn_a.k_proj(x_single).view(B1, T1, attn_a.num_kv_groups, attn_a.head_dim)
+    v1 = attn_a.v_proj(x_single).view(B1, T1, attn_a.num_kv_groups, attn_a.head_dim)
+    q1, k1 = attn_a.rope(q1, k1, 0)
+    k1e = repeat_kv(k1, attn_a.num_heads, attn_a.num_kv_groups)
+    v1e = repeat_kv(v1, attn_a.num_heads, attn_a.num_kv_groups)
+    q1t = q1.transpose(1, 2)
+    k1t = k1e.transpose(1, 2)
+    v1t = v1e.transpose(1, 2)
+    o1 = F.scaled_dot_product_attention(q1t, k1t, v1t, is_causal=True)
+    o1 = o1.transpose(1, 2).contiguous().view(B1, T1, -1)
 
-# ============================================================
-print("\n=== Attention incremental (KV cache) ===")
-x1 = x[:, :1, :]  # primer token
-x2 = x[:, 1:2, :]  # segundo token
-x12 = x[:, :2, :]  # primeros dos tokens juntos
+    # forward_with_cache path
+    B2, S2, _ = x_single.shape
+    q2 = attn_b.q_proj(x_single).view(B2, S2, attn_b.num_heads, attn_b.head_dim)
+    k2 = attn_b.k_proj(x_single).view(B2, S2, attn_b.num_kv_groups, attn_b.head_dim)
+    v2 = attn_b.v_proj(x_single).view(B2, S2, attn_b.num_kv_groups, attn_b.head_dim)
+    q2, k2 = attn_b.rope(q2, k2, 0)
+    # cache=None → k_full=k2, v_full=v2
+    k2e = repeat_kv(k2, attn_b.num_heads, attn_b.num_kv_groups)
+    v2e = repeat_kv(v2, attn_b.num_heads, attn_b.num_kv_groups)
+    q2t = q2.transpose(1, 2)
+    k2t = k2e.transpose(1, 2)
+    v2t = v2e.transpose(1, 2)
+    o2 = F.scaled_dot_product_attention(q2t, k2t, v2t, is_causal=(True))  # cache is None
+    o2 = o2.transpose(1, 2).contiguous().view(B2, S2, -1)
 
-# forward normal con 2 tokens
-ref_out, _ = attn.forward(x12)
+print(f"  q:      maxdiff={maxdiff(q1, q2):.2e}")
+print(f"  k:      maxdiff={maxdiff(k1, k2):.2e}")
+print(f"  v:      maxdiff={maxdiff(v1, v2):.2e}")
+print(f"  q.T:    maxdiff={maxdiff(q1t, q2t):.2e}")
+print(f"  k.T:    maxdiff={maxdiff(k1t, k2t):.2e}")
+print(f"  v.T:    maxdiff={maxdiff(v1t, v2t):.2e}")
+print(f"  sdpa:   maxdiff={maxdiff(o1, o2):.2e}")
+print(f"  o_proj: maxdiff={maxdiff(attn_a.o_proj(o1), attn_b.o_proj(o2)):.2e}")
 
-# forward incremental: token1, luego token2
-out1, cache1 = attn.forward_with_cache(x1, offset=0, cache=None)
-out2, cache2 = attn.forward_with_cache(x2, offset=1, cache=cache1)
+# Ahora probar forward_with_cache con cache pre-poblado
+print()
+print(f"  === forward_with_cache con cache de 1 token ===")
+x_pos1 = torch.randn(B, 1, cfg.dim)
+x_pos2 = torch.randn(B, 1, cfg.dim)
+x_both = torch.cat([x_pos1, x_pos2], dim=1)
 
-d1 = maxdiff(out1, ref_out[:, 0:1])
-d2 = maxdiff(out2, ref_out[:, 1:2])
-check("incremental: out1 == ref[0]", torch.allclose(out1, ref_out[:, 0:1], atol=1e-5), f"maxdiff={d1:.2e}")
-check("incremental: out2 == ref[1]", torch.allclose(out2, ref_out[:, 1:2], atol=1e-5), f"maxdiff={d2:.2e}")
+# forward con ambos tokens (is_causal=True)
+ref2, _ = attn_a.forward(x_both)
+ref_first = ref2[:, 0:1]
+ref_second = ref2[:, 1:2]
+
+# forward_with_cache incremental
+out_a, cache_a = attn_b.forward_with_cache(x_pos1, offset=0, cache=None)
+out_b, cache_b = attn_b.forward_with_cache(x_pos2, offset=1, cache=cache_a)
+
+print(f"  inc step1 vs ref[:,0]: maxdiff={maxdiff(out_a, ref_first):.2e}")
+print(f"  inc step2 vs ref[:,1]: maxdiff={maxdiff(out_b, ref_second):.2e}")
+
+# check cache shapes
+print(f"  cache_a k shape: {cache_a[0].shape}")
+print(f"  cache_b k shape: {cache_b[0].shape}")
+
+check("DEBUG: forward == forward_with_cache attn_a vs attn_b",
+      torch.allclose(out_fwd, out_cache, atol=1e-5))
 
 # cache final debe tener K,V de ambos tokens
 check("cache seqlen = 2 tras incremental", cache2[0].shape[1] == 2)
