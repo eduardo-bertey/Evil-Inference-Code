@@ -95,7 +95,7 @@ class Attention(nn.Module):
             k_full = k_new
             v_full = v_new
 
-        new_cache = (k_full, v_full)
+        new_cache = (k_full.clone(), v_full.clone())
 
         k_exp = repeat_kv(k_full, self.num_heads, self.num_kv_groups)
         v_exp = repeat_kv(v_full, self.num_heads, self.num_kv_groups)
