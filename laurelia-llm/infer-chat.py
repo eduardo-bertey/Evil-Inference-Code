@@ -87,7 +87,7 @@ def main():
             elif cmd == "/ctx" and val:
                 max_ctx = int(val)
                 print(f"  max_ctx = {max_ctx}")
-            elif cmd == "/length" and val:
+            elif cmd in ("/length", "/len") and val:
                 max_new = int(val)
                 print(f"  max_new_tokens = {max_new}")
             elif cmd == "/reset":
