@@ -149,15 +149,20 @@ check("prompt loop final logit == full forward last logit",
 
 # ============================================================
 print("\n=== SDPA is_causal ===")
-# SDPA con is_causal=True y q_len=1, kv_len=N debe atender a todos los keys
+# SDPA con is_causal=True y q_len=1, kv_len=N: query index 0 solo ve key index 0
 q_test = torch.randn(1, cfg.heads, 1, head_dim)
 k_test = torch.randn(1, cfg.heads, 5, head_dim)
 v_test = torch.randn(1, cfg.heads, 5, head_dim)
 out_causal = F.scaled_dot_product_attention(q_test, k_test, v_test, is_causal=True)
 out_nomask = F.scaled_dot_product_attention(q_test, k_test, v_test, is_causal=False)
-# con q_len=1 y causal, la máscara causal permite atender a TODOS (posición 0 puede ver posiciones 0..N-1)
-check("SDPA causal q_len=1 attiende todos los keys",
-      torch.allclose(out_causal, out_nomask, atol=1e-5))
+check("SDPA causal q_len=1 NO attiende todos los keys (solo key[0])",
+      not torch.allclose(out_causal, out_nomask, atol=1e-5))
+# verificar que causal con q_len=1 da = attender solo key[0]
+k0 = k_test[:, :, :1, :]
+v0 = v_test[:, :, :1, :]
+out_only_k0 = F.scaled_dot_product_attention(q_test, k0, v0, is_causal=False)
+check("SDPA causal q_len=1 == attender solo key[0]",
+      torch.allclose(out_causal, out_only_k0, atol=1e-5))
 
 print(f"\n{'='*40}")
 print(f"Resultados: {pass_} passed, {fail_} failed")

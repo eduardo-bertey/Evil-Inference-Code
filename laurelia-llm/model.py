@@ -104,10 +104,9 @@ class Attention(nn.Module):
         k = k_exp.transpose(1, 2)
         v = v_exp.transpose(1, 2)
 
-        S_full = k.shape[2]
         att_output = F.scaled_dot_product_attention(
             q, k, v,
-            is_causal=True,
+            is_causal=False,
         )
 
         att_output = att_output.transpose(1, 2).contiguous().view(B, S_new, -1)
