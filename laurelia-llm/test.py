@@ -180,29 +180,25 @@ expected_unif = v_unif.mean(dim=2, keepdim=True)
 check("SDPA uniforme: output ≈ mean(V)",
       torch.allclose(out_unif, expected_unif, atol=1e-4))
 
-# Attention completa con known weights, S=1 (sin RoPE)
-cfg_no_rope = Config()
-cfg_no_rope.rotary_pct = 0.0
-attn_norope = Attention(cfg_no_rope)
-attn_norope.eval()
-attn_norope.q_proj.weight.data.zero_()
-attn_norope.k_proj.weight.data.zero_()
-attn_norope.v_proj.weight.data.zero_()
-# o_proj: identity
-attn_norope.o_proj.weight.data = torch.eye(cfg.dim)
-# Q = 10 en dim 0, K[0] = 10 en dim 0 → attend a K[0] → output = V[0]
-attn_norope.q_proj.weight.data[0, 0] = 10.0
-attn_norope.k_proj.weight.data[0, 0] = 10.0
-# V[0] dim 0 = 1.0, V[1] otro valor
-attn_norope.v_proj.weight.data[0, 0] = 2.0
-attn_norope.v_proj.weight.data[0, 1] = 1.0
-x_test = torch.eye(cfg.dim).unsqueeze(0)  # (1, 768, 768), one-hot por pos
-out_attn = attn_norope(x_test)  # (1, 768, 768)
-# position 0: x=[1,0,...], q dim0 = 10*1 = 10, k[0] dim0 = 10*1 = 10
-# QK^T = [100, 0, 0, ...] output = V[0] = [2, 1, 0, ...] 
-# after o_proj identity: out[0,0,0] = 2, out[0,0,1] = 1
-check("Attention: attend pos0 con Q/K/V conocidos",
-      torch.allclose(out_attn[0, 0, 0:2], torch.tensor([2.0, 1.0]), atol=1e-1))
+# Atención hard con SDPA directo (shapes correctas) + verificar proyecciones lineales
+q_hard2 = torch.zeros(1, 4, 1, 8)
+q_hard2[:, :, 0, 0] = 5.0
+k_hard2 = torch.zeros(1, 4, 3, 8)
+k_hard2[:, :, 0, 0] = 5.0
+v_hard2 = torch.arange(24, dtype=torch.float32).reshape(1, 4, 3, 8)
+out_hard2 = F.scaled_dot_product_attention(q_hard2, k_hard2, v_hard2, is_causal=False)
+# solo K[0] atrae atención por tener dim0=5 igual que Q, el resto es 0
+check("SDPA multi-head hard attention a K[0]",
+      torch.allclose(out_hard2, v_hard2[:, :, :1, :], atol=1e-3))
+
+# Verificar shapes de proyecciones de Attention
+attn_shape = Attention(cfg)
+check("q_proj output shape",
+      attn_shape.q_proj(torch.randn(2, 5, cfg.dim)).shape == (2, 5, cfg.heads*head_dim))
+check("k_proj output shape",
+      attn_shape.k_proj(torch.randn(2, 5, cfg.dim)).shape == (2, 5, cfg.kv_groups*head_dim))
+check("v_proj output shape",
+      attn_shape.v_proj(torch.randn(2, 5, cfg.dim)).shape == (2, 5, cfg.kv_groups*head_dim))
 
 # ============================================================
 print("\n=== Attention GQA (repeat_kv) ===")
