@@ -231,12 +231,14 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         Q_rot_raw = Q_rot_raw.reshape(B, S_new, self.num_heads, self.d_rotate)
         Q_rot = self.rope.apply_to_single(Q_rot_raw, offset=offset)
 
+        K_rot_new = self.rope.apply_to_single(K_rot_raw.unsqueeze(2), offset=offset)
+
         if cache is not None:
             C_KV_full = torch.cat([cache[0], C_KV_new], dim=1)
-            K_rot_full = torch.cat([cache[1], K_rot_raw], dim=1)
+            K_rot_full = torch.cat([cache[1], K_rot_new], dim=1)
         else:
             C_KV_full = C_KV_new
-            K_rot_full = K_rot_raw
+            K_rot_full = K_rot_new
         S_full = C_KV_full.shape[1]
 
         kv_up = self.qkv.W_up_kv(C_KV_full)
@@ -244,10 +246,8 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         K_state = K_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
         V_state = V_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
 
-        K_rot = self.rope.apply_to_single(K_rot_full.unsqueeze(2), offset=0)
-
         attn_out = self._attention_from_components(
-            Q_state, Q_rot, K_state, V_state, K_rot, S_new, S_full, S_new > 1)
+            Q_state, Q_rot, K_state, V_state, K_rot_full, S_new, S_full, S_new > 1)
         return self.o_proj(attn_out), (C_KV_full, K_rot_full)
 
     def forward_with_cache_partial(self, x, offset, cache, rotary_pct):
