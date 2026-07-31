@@ -46,10 +46,10 @@ impl Attention {
         rotary_pct: f64,
         causal: bool,
     ) -> Result<Self> {
-        let q_proj = candle_nn::linear(dim, heads * head_dim, vb.pp("q_proj"))?;
-        let k_proj = candle_nn::linear(dim, kv_groups * head_dim, vb.pp("k_proj"))?;
-        let v_proj = candle_nn::linear(dim, kv_groups * head_dim, vb.pp("v_proj"))?;
-        let o_proj = candle_nn::linear(heads * head_dim, dim, vb.pp("o_proj"))?;
+        let q_proj = candle_nn::linear_no_bias(dim, heads * head_dim, vb.pp("q_proj"))?;
+        let k_proj = candle_nn::linear_no_bias(dim, kv_groups * head_dim, vb.pp("k_proj"))?;
+        let v_proj = candle_nn::linear_no_bias(dim, kv_groups * head_dim, vb.pp("v_proj"))?;
+        let o_proj = candle_nn::linear_no_bias(heads * head_dim, dim, vb.pp("o_proj"))?;
 
         let rope = RoPE::new(head_dim, block_size, 10000.0, rotary_pct, &vb.device())?;
 

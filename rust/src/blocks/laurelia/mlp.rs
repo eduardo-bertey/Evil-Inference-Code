@@ -14,8 +14,8 @@ pub struct MLP {
 
 impl MLP {
     pub fn new(vb: VarBuilder, dim: usize, ffn_dim: usize) -> Result<Self> {
-        let fc1 = candle_nn::linear(dim, 2 * ffn_dim, vb.pp("fc1"))?;
-        let fc2 = candle_nn::linear(ffn_dim, dim, vb.pp("fc2"))?;
+        let fc1 = candle_nn::linear_no_bias(dim, 2 * ffn_dim, vb.pp("fc1"))?;
+        let fc2 = candle_nn::linear_no_bias(ffn_dim, dim, vb.pp("fc2"))?;
         Ok(Self { fc1, fc2, ffn_dim })
     }
 
