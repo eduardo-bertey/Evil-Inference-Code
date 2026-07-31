@@ -9,3 +9,4 @@ pub mod trasformer_bit;
 pub mod kuantgrad;
 pub mod turbokuant;
 pub mod load_pytorch;
+pub mod laurelia;

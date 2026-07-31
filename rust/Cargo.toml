@@ -30,6 +30,8 @@ hf-hub = { version = "1.0.0-rc.1", features = ["blocking"] }
 cudarc = "0.19"
 half = "2.4"
 safetensors = "0.4"
+candle-core = "0.8"
+candle-nn = "0.8"
 
 [[bin]]
 name = "large_chat"
@@ -145,6 +147,10 @@ path = "xorIA/mingruchat.rs"
 [[bin]]
 name = "mingru_equivalence"
 path = "xorIA/bin/mingru_equivalence.rs"
+
+[[bin]]
+name = "laurelia_chat"
+path = "xorIA/laurelia_chat.rs"
 
 [[bin]]
 name = "mingruchat_cuda"
