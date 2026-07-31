@@ -1,11 +1,12 @@
 /// Laurelia Chat — inferencia interactiva del port Candle.
 ///
-/// Sin argumentos: pregunta si descarga modelo + tokenizer automático
+/// Sin argumentos: pregunta si descarga checkpoint + tokenizer automático
 /// desde HuggingFace (ScortexIA/laurelia@laurelia-llm) y abre el chat.
+/// El checkpoint `.pt` de torch se lee directo con Candle (pickle), sin python.
 ///
 /// Uso:
 ///   cargo run --release --bin laurelia_chat
-///   cargo run --release --bin laurelia_chat -- <weights.safetensors> <tokenizer.json> [flags]
+///   cargo run --release --bin laurelia_chat -- <weights.pt|safetensors> <tokenizer.json> [flags]
 ///
 /// Flags:
 ///   --prompt "texto"   genera una sola respuesta y sale
@@ -29,7 +30,6 @@ const REPO_ID: &str = "ScortexIA/laurelia";
 const REVISION: &str = "laurelia-llm";
 const CKPT_FILE: &str = "checkpoint.pt";
 const TOK_FILE: &str = "tokenizer.json";
-const SAFE_FILE: &str = "laurelia.safetensors";
 
 struct GenParams {
     max_new: usize,
@@ -60,29 +60,6 @@ fn download(file: &str) -> Result<std::path::PathBuf> {
     let repo = api.repo(Repo::with_revision(REPO_ID.to_string(), RepoType::Model, REVISION.to_string()));
     repo.get(file)
         .map_err(|e| candle_core::Error::Msg(format!("hf download {file}: {e}")))
-}
-
-fn convert_pt_to_safetensors(pt: &str, out: &str) -> Result<()> {
-    if std::path::Path::new(out).exists() {
-        return Ok(());
-    }
-    let script = r#"import torch,sys
-from safetensors.torch import save_file
-c = torch.load(sys.argv[1], map_location="cpu")
-sd = c.get("model", c)
-if isinstance(sd, dict):
-    sd.pop("head.emb_weight", None)
-save_file(sd, sys.argv[2])
-"#;
-    let status = std::process::Command::new("python3")
-        .args(["-c", script, pt, out])
-        .status()
-        .map_err(|e| candle_core::Error::Msg(format!("python3: {e}")))?;
-    if !status.success() {
-        return err(format!("falló conversión {pt} -> {out} (status {status})"));
-    }
-    println!("Convertido: {out}");
-    Ok(())
 }
 
 fn ask_auto() -> Result<bool> {
@@ -298,14 +275,16 @@ fn main() -> Result<()> {
             println!("Descargando tokenizer + checkpoint de HF ({REPO_ID}@{REVISION})...");
             let ckpt = download(CKPT_FILE)?;
             let tok = download(TOK_FILE)?;
-            let ckpt = ckpt.to_string_lossy().to_string();
-            convert_pt_to_safetensors(&ckpt, SAFE_FILE)?;
-            (SAFE_FILE.to_string(), tok.to_string_lossy().to_string())
+            (ckpt.to_string_lossy().to_string(), tok.to_string_lossy().to_string())
         }
     };
 
     println!("Cargando modelo: {weights_path} ({:?}, {:?})", dtype, device);
-    let model = Weights::load(&weights_path, &Config::default(), dtype, &device)?;
+    let model = if weights_path.ends_with(".pt") || weights_path.ends_with(".pth") {
+        Weights::load_pth(&weights_path, &Config::default(), dtype, &device)?
+    } else {
+        Weights::load(&weights_path, &Config::default(), dtype, &device)?
+    };
     let tokenizer = LaureliaTokenizer::from_file(&tok_path)
         .map_err(|e| candle_core::Error::Msg(format!("tokenizer: {e}")))?;
 
