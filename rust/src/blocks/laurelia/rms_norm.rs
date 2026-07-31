@@ -23,7 +23,9 @@ impl RMSNorm {
         let msq = x.sqr()?.mean_keepdim(last)?;
         let eps_t = Tensor::new(self.eps, x.device())?.reshape((1,))?;
         let msq = msq.broadcast_add(&eps_t)?.powf(-0.5)?;
-        let out = x.mul(&msq)?.mul(&self.weight.to_dtype(DType::F32)?)?;
+        let out = x
+            .broadcast_mul(&msq)?
+            .broadcast_mul(&self.weight.to_dtype(DType::F32)?)?;
         Ok(out)
     }
 }
