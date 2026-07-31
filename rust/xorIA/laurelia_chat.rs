@@ -21,7 +21,7 @@ use candle_core::{DType, Device, Result, Tensor};
 use std::io::{self, Write};
 use std::time::Instant;
 
-use hf_hub::{api::sync::Api, Repo, RepoType};
+use hf_hub::HFClientSync;
 
 use xlstm::blocks::laurelia::weights::Weights;
 use xlstm::blocks::laurelia::{Config, LaureliaTokenizer, LLM};
@@ -56,9 +56,14 @@ fn err<T>(msg: String) -> Result<T> {
 }
 
 fn download(file: &str) -> Result<std::path::PathBuf> {
-    let api = Api::new().map_err(|e| candle_core::Error::Msg(format!("hf-hub api: {e}")))?;
-    let repo = api.repo(Repo::with_revision(REPO_ID.to_string(), RepoType::Model, REVISION.to_string()));
-    repo.get(file)
+    let client = HFClientSync::new()
+        .map_err(|e| candle_core::Error::Msg(format!("hf-hub api: {e}")))?;
+    client
+        .model("ScortexIA", "laurelia")
+        .download_file()
+        .filename(file)
+        .revision(REVISION.to_string())
+        .send()
         .map_err(|e| candle_core::Error::Msg(format!("hf download {file}: {e}")))
 }
 
