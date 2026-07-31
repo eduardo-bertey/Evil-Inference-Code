@@ -1,7 +1,11 @@
 /// Laurelia Chat — inferencia interactiva del port Candle.
 ///
+/// Sin argumentos: pregunta si descarga modelo + tokenizer automático
+/// desde HuggingFace (ScortexIA/laurelia@laurelia-llm) y abre el chat.
+///
 /// Uso:
-///   cargo run --bin laurelia_chat -- <weights.safetensors> <tokenizer.json> [flags]
+///   cargo run --release --bin laurelia_chat
+///   cargo run --release --bin laurelia_chat -- <weights.safetensors> <tokenizer.json> [flags]
 ///
 /// Flags:
 ///   --prompt "texto"   genera una sola respuesta y sale
@@ -11,16 +15,21 @@
 ///   --top-p P          (default 0.9)
 ///   --rep R            repetition penalty (default 1.2)
 ///   --bf16             carga los pesos en BF16 (default F32)
-///
-/// Modo interactivo: `len <n>`, `temp <x>`, `topk <n>`, `topp <x>`,
-/// `rep <x>`, `salir`/`exit`.
 
-use candle_core::{DType, Device, Result};
+use candle_core::{DType, Device, Result, Tensor};
 use std::io::{self, Write};
 use std::time::Instant;
 
-use xlstm::blocks::laurelia::{Config, LaureliaTokenizer, LLM};
+use hf_hub::{api::sync::Api, Repo, RepoType};
+
 use xlstm::blocks::laurelia::weights::Weights;
+use xlstm::blocks::laurelia::{Config, LaureliaTokenizer, LLM};
+
+const REPO_ID: &str = "ScortexIA/laurelia";
+const REVISION: &str = "laurelia-llm";
+const CKPT_FILE: &str = "checkpoint.pt";
+const TOK_FILE: &str = "tokenizer.json";
+const SAFE_FILE: &str = "laurelia.safetensors";
 
 struct GenParams {
     max_new: usize,
@@ -42,6 +51,58 @@ impl Default for GenParams {
     }
 }
 
+fn err<T>(msg: String) -> Result<T> {
+    Err(candle_core::Error::Msg(msg))
+}
+
+fn download(file: &str) -> Result<std::path::PathBuf> {
+    let api = Api::new().map_err(|e| candle_core::Error::Msg(format!("hf-hub api: {e}")))?;
+    let repo = api.repo(Repo::with_revision(REPO_ID.to_string(), RepoType::Model, REVISION.to_string()));
+    repo.get(file)
+        .map_err(|e| candle_core::Error::Msg(format!("hf download {file}: {e}")))
+}
+
+fn convert_pt_to_safetensors(pt: &str, out: &str) -> Result<()> {
+    if std::path::Path::new(out).exists() {
+        return Ok(());
+    }
+    let script = r#"import torch,sys
+from safetensors.torch import save_file
+c = torch.load(sys.argv[1], map_location="cpu")
+sd = c.get("model", c)
+if isinstance(sd, dict):
+    sd.pop("head.emb_weight", None)
+save_file(sd, sys.argv[2])
+"#;
+    let status = std::process::Command::new("python3")
+        .args(["-c", script, pt, out])
+        .status()
+        .map_err(|e| candle_core::Error::Msg(format!("python3: {e}")))?;
+    if !status.success() {
+        return err(format!("falló conversión {pt} -> {out} (status {status})"));
+    }
+    println!("Convertido: {out}");
+    Ok(())
+}
+
+fn ask_auto() -> Result<bool> {
+    print!("No pasaste modelo ni tokenizer.\n¿Descargar automático desde HF ({REPO_ID}) y abrir el chat? [si/exit] > ");
+    io::stdout().flush().unwrap();
+    let mut line = String::new();
+    if io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| candle_core::Error::Msg(format!("stdin: {e}")))?
+        == 0
+    {
+        return Ok(false);
+    }
+    let l = line.trim().to_lowercase();
+    if l == "si" || l == "s" || l == "y" || l == "yes" {
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 fn print_help() {
     println!("Comandos:");
     println!("  - Escribe un prompt para generar texto.");
@@ -52,12 +113,7 @@ fn print_help() {
     println!("  - 'salir' o 'exit' para terminar.");
 }
 
-fn generate(
-    model: &LLM,
-    tokenizer: &LaureliaTokenizer,
-    prompt: &str,
-    p: &GenParams,
-) -> Result<()> {
+fn generate(model: &LLM, tokenizer: &LaureliaTokenizer, prompt: &str, p: &GenParams) -> Result<()> {
     let ids = tokenizer
         .encode(prompt)
         .map_err(|e| candle_core::Error::Msg(format!("encode: {e}")))?;
@@ -66,7 +122,7 @@ fn generate(
         return Ok(());
     }
     let prompt_n = ids.len();
-    let input = candle_core::Tensor::from_vec(ids, (1, prompt_n), model.device())?;
+    let input = Tensor::from_vec(ids, (1, prompt_n), model.device())?;
 
     let start = Instant::now();
     let out = model.generate(
@@ -86,88 +142,11 @@ fn generate(
         .decode(&ids)
         .map_err(|e| candle_core::Error::Msg(format!("decode: {e}")))?;
     println!("{text}\n");
-    println!("  [{n_gen} tokens en {elapsed:.2}s | {:.1} tok/s]",
-             n_gen as f32 / elapsed);
+    println!("  [{n_gen} tokens en {elapsed:.2}s | {:.1} tok/s]", n_gen as f32 / elapsed);
     Ok(())
 }
 
-fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Uso: laurelia_chat <weights.safetensors> <tokenizer.json> [flags]");
-        std::process::exit(1);
-    }
-
-    let weights_path = &args[1];
-    let tok_path = &args[2];
-
-    let mut gen = GenParams::default();
-    let mut bf16 = false;
-    let mut one_shot = None;
-
-    let mut i = 3;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--prompt" => {
-                i += 1;
-                one_shot = Some(args.get(i).cloned().unwrap_or_default());
-            }
-            "--max-new" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    gen.max_new = v.parse().unwrap_or(gen.max_new);
-                }
-            }
-            "--temp" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    gen.temperature = v.parse().unwrap_or(gen.temperature);
-                }
-            }
-            "--top-k" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    gen.top_k = v.parse().unwrap_or(gen.top_k);
-                }
-            }
-            "--top-p" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    gen.top_p = v.parse().unwrap_or(gen.top_p);
-                }
-            }
-            "--rep" => {
-                i += 1;
-                if let Some(v) = args.get(i) {
-                    gen.repetition_penalty = v.parse().unwrap_or(gen.repetition_penalty);
-                }
-            }
-            "--bf16" => bf16 = true,
-            other => {
-                eprintln!("Flag desconocido: {other}");
-                std::process::exit(1);
-            }
-        }
-        i += 1;
-    }
-
-    let device = Device::Cpu;
-    let dtype = if bf16 { DType::BF16 } else { DType::F32 };
-
-    println!("Cargando modelo: {weights_path} ({:?}, {:?})", dtype, device);
-    let model = Weights::load(weights_path, &Config::default(), dtype, &device)?;
-    let tokenizer = LaureliaTokenizer::from_file(tok_path)
-        .map_err(|e| candle_core::Error::Msg(format!("tokenizer: {e}")))?;
-
-    println!("Config: dim={} heads={} kv_groups={} layers={} ffn={} block={} vocab={}",
-        model.config.dim, model.config.heads, model.config.kv_groups,
-        model.config.layers, model.config.ffn_dim, model.config.block_size,
-        tokenizer.vocab_size());
-
-    if let Some(prompt) = one_shot {
-        return generate(&model, &tokenizer, &prompt, &gen);
-    }
-
+fn chat_loop(model: &LLM, tokenizer: &LaureliaTokenizer, gen: &mut GenParams) -> Result<()> {
     println!("\n╔════════════════════════════════════════════╗");
     println!("║      LAURELIA CHAT (Candle, CPU)           ║");
     println!("╚════════════════════════════════════════════╝\n");
@@ -237,9 +216,113 @@ fn main() -> Result<()> {
             continue;
         }
 
-        generate(&model, &tokenizer, input, &gen)?;
+        generate(model, tokenizer, input, gen)?;
         println!();
     }
-
     Ok(())
+}
+
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    let mut gen = GenParams::default();
+    let mut bf16 = false;
+    let mut one_shot = None;
+    let mut model_arg = None;
+    let mut tok_arg = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--prompt" => {
+                i += 1;
+                one_shot = Some(args.get(i).cloned().unwrap_or_default());
+            }
+            "--max-new" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    gen.max_new = v.parse().unwrap_or(gen.max_new);
+                }
+            }
+            "--temp" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    gen.temperature = v.parse().unwrap_or(gen.temperature);
+                }
+            }
+            "--top-k" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    gen.top_k = v.parse().unwrap_or(gen.top_k);
+                }
+            }
+            "--top-p" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    gen.top_p = v.parse().unwrap_or(gen.top_p);
+                }
+            }
+            "--rep" => {
+                i += 1;
+                if let Some(v) = args.get(i) {
+                    gen.repetition_penalty = v.parse().unwrap_or(gen.repetition_penalty);
+                }
+            }
+            "--bf16" => bf16 = true,
+            s if s.starts_with('-') => {
+                return err(format!("flag desconocido: {s}"));
+            }
+            pos => {
+                if model_arg.is_none() {
+                    model_arg = Some(pos.to_string());
+                } else if tok_arg.is_none() {
+                    tok_arg = Some(pos.to_string());
+                } else {
+                    return err(format!("argumento de más: {pos}"));
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let device = Device::Cpu;
+    let dtype = if bf16 { DType::BF16 } else { DType::F32 };
+
+    let (weights_path, tok_path) = match (model_arg, tok_arg) {
+        (Some(m), Some(t)) => (m, t),
+        _ => {
+            if !ask_auto()? {
+                println!("exit");
+                return Ok(());
+            }
+            println!("Descargando tokenizer + checkpoint de HF ({REPO_ID}@{REVISION})...");
+            let ckpt = download(CKPT_FILE)?;
+            let tok = download(TOK_FILE)?;
+            let ckpt = ckpt.to_string_lossy().to_string();
+            convert_pt_to_safetensors(&ckpt, SAFE_FILE)?;
+            (SAFE_FILE.to_string(), tok.to_string_lossy().to_string())
+        }
+    };
+
+    println!("Cargando modelo: {weights_path} ({:?}, {:?})", dtype, device);
+    let model = Weights::load(&weights_path, &Config::default(), dtype, &device)?;
+    let tokenizer = LaureliaTokenizer::from_file(&tok_path)
+        .map_err(|e| candle_core::Error::Msg(format!("tokenizer: {e}")))?;
+
+    println!(
+        "Config: dim={} heads={} kv_groups={} layers={} ffn={} block={} vocab={}",
+        model.config.dim,
+        model.config.heads,
+        model.config.kv_groups,
+        model.config.layers,
+        model.config.ffn_dim,
+        model.config.block_size,
+        tokenizer.vocab_size()
+    );
+
+    if let Some(prompt) = one_shot {
+        return generate(&model, &tokenizer, &prompt, &gen);
+    }
+
+    chat_loop(&model, &tokenizer, &mut gen)
 }
