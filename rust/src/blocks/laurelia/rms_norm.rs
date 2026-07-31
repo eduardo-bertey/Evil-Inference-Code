@@ -21,7 +21,8 @@ impl RMSNorm {
         let x = x.to_dtype(DType::F32)?;
         let last = x.rank() - 1;
         let msq = x.sqr()?.mean_keepdim(last)?;
-        let msq = (msq + self.eps)?.powf(-0.5)?;
+        let eps_t = Tensor::new(self.eps, x.device())?.reshape((1,))?;
+        let msq = msq.broadcast_add(&eps_t)?.powf(-0.5)?;
         let out = x.mul(&msq)?.mul(&self.weight.to_dtype(DType::F32)?)?;
         Ok(out)
     }
