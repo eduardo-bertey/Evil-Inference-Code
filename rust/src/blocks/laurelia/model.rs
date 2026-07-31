@@ -251,6 +251,7 @@ impl LLM {
         }
 
         let all = [tokens[..prompt_len].to_vec(), gen].concat();
-        Ok(Tensor::from_vec(all, (1, all.len()), self.device())?)
+        let n = all.len();
+        Ok(Tensor::from_vec(all, (1, n), self.device())?)
     }
 }
