@@ -75,14 +75,14 @@ impl Attention {
         is_causal: bool,
     ) -> Result<Tensor> {
         let scale = (self.head_dim as f64).sqrt() as f32;
-        let scale_t = Tensor::new(scale, q.device())?;
-        let mut scores = (q.matmul(&k.transpose(2, 3)?)? / scale_t)?; // (B, heads, S_new, S_full)
+        let scale_t = Tensor::new(scale, q.device())?.reshape((1,))?;
+        let mut scores = q.matmul(&k.transpose(2, 3)?)?.broadcast_div(&scale_t)?;
 
         if is_causal {
             let (_, _, q_len, kv_len) = scores.dims4()?;
             let device = scores.device();
             let mask = self.causal_mask(q_len, kv_len, device)?;
-            scores = (scores + mask)?;
+            scores = scores.broadcast_add(&mask)?;
         }
 
         let attn_w = candle_nn::ops::softmax(&scores, 3)?;
