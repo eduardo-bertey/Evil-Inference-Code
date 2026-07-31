@@ -3,8 +3,8 @@
 /// Embeddings + N blocks + norm_f + lm_head tied a embeddings.
 /// generate(): temperature, top_k, top_p, repetition_penalty, eos.
 
+use candle_core::IndexOp;
 use candle_core::{DType, Device, Result, Tensor};
-use candle_core::index::TensorIndexer;
 use candle_nn::{Embedding, Module, VarBuilder};
 
 use super::block::Block;
@@ -66,11 +66,11 @@ impl LLM {
     }
 
     pub fn device(&self) -> &Device {
-        self.embeddings.embeddings.device()
+        self.embeddings.embeddings().device()
     }
 
     pub fn dtype(&self) -> DType {
-        self.embeddings.embeddings.dtype()
+        self.embeddings.embeddings().dtype()
     }
 
     /// Forward completo (prefill de toda la secuencia, sin cache).
@@ -231,7 +231,7 @@ impl LLM {
         let prompt_len = input_ids.dim(1)?;
         let mut caches: Vec<Option<KVCache>> = vec![None; self.blocks.len()];
         let mut tokens: Vec<u32> = input_ids.i((0, ..))?.to_vec1()?;
-        let mut logits = Tensor::zeros((1, 1, self.config.emb_num), self.device())?;
+        let mut logits = Tensor::zeros((1, 1, self.config.emb_num), DType::F32, self.device())?;
         for i in 0..prompt_len {
             let t = Tensor::from_vec(vec![tokens[i]], (1, 1), self.device())?;
             logits = self.forward_with_cache(&t, i, &mut caches)?;

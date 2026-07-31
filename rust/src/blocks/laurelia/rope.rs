@@ -82,8 +82,8 @@ impl RoPE {
         let first = x_rot.narrow(3, 0, hh)?;
         let second = x_rot.narrow(3, hh, hh)?;
 
-        let rotated_first = (first.clone() * cos.clone() - second.clone() * sin.clone())?;
-        let rotated_second = (first * sin + second * cos)?;
+        let rotated_first = ((first.clone() * cos.clone())? - (second.clone() * sin.clone())?)?;
+        let rotated_second = ((first * sin)? + (second * cos)?)?;
         let rotated = Tensor::cat(&[rotated_first, rotated_second], 3)?;
 
         Tensor::cat(&[rotated, x_pass], 3)

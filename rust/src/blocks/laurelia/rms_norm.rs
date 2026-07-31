@@ -20,8 +20,10 @@ impl RMSNorm {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let x = x.to_dtype(DType::F32)?;
         let last = x.rank() - 1;
-        let msq = (x.sqr()?.mean_keepdim(last)? + self.eps)?.rsqrt()?;
+        let msq = x.sqr()?.mean_keepdim(last)?;
+        let eps_t = Tensor::new(self.eps, x.device())?;
+        let msq = (msq + eps_t)?.powf(-0.5)?;
         let out = x.mul(&msq)?.mul(&self.weight.to_dtype(DType::F32)?)?;
-        out
+        Ok(out)
     }
 }

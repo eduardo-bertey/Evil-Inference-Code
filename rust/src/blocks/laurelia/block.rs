@@ -48,7 +48,8 @@ impl Block {
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let h = self.attn.forward(&self.ln_1.forward(x)?, 0)?;
         let x = (x + h)?;
-        let x = (x + self.mlp.forward(&self.ln_2.forward(&x)?)?)?;
+        let h = self.mlp.forward(&self.ln_2.forward(&x)?)?;
+        let x = (x + h)?;
         Ok(x)
     }
 
@@ -61,7 +62,8 @@ impl Block {
         let h = self.ln_1.forward(x)?;
         let (h, new_cache) = self.attn.forward_with_cache(&h, offset, cache)?;
         let x = (x + h)?;
-        let x = (x + self.mlp.forward(&self.ln_2.forward(&x)?)?)?;
+        let h = self.mlp.forward(&self.ln_2.forward(&x)?)?;
+        let x = (x + h)?;
         Ok((x, new_cache))
     }
 }

@@ -20,7 +20,7 @@ impl MLP {
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let [b, s, _] = x.dims3()?;
+        let (b, s, _) = x.dims3()?;
         let h = self.fc1.forward(x)?.reshape((b, s, 2, self.ffn_dim))?;
         let x = h.narrow(2, 0, 1)?.squeeze(2)?;
         let gate = h.narrow(2, 1, 1)?.squeeze(2)?;

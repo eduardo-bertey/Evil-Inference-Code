@@ -17,7 +17,7 @@ pub fn repeat_kv(x: &Tensor, num_heads: usize, num_kv_groups: usize) -> Result<T
         return Ok(x.clone());
     }
     let repeats = num_heads / num_kv_groups;
-    let [b, s, g, d] = x.dims4()?;
+    let (b, s, g, d) = x.dims4()?;
     // (B, S, G, 1, D) -> (B, S, G, repeats, D) -> (B, S, G*repeats, D)
     let x = x.unsqueeze(3)?.expand((b, s, g, repeats, d))?;
     x.reshape((b, s, g * repeats, d))
@@ -74,11 +74,12 @@ impl Attention {
         v: &Tensor, // (B, heads, S_full, head_dim)
         is_causal: bool,
     ) -> Result<Tensor> {
-        let scale = (self.head_dim as f64).sqrt();
-        let mut scores = (q.matmul(&k.transpose(2, 3)?)? / scale as f32)?; // (B, heads, S_new, S_full)
+        let scale = (self.head_dim as f64).sqrt() as f32;
+        let scale_t = Tensor::new(scale, q.device())?;
+        let mut scores = (q.matmul(&k.transpose(2, 3)?)? / scale_t)?; // (B, heads, S_new, S_full)
 
         if is_causal {
-            let [_, _, q_len, kv_len] = scores.dims4()?;
+            let (_, _, q_len, kv_len) = scores.dims4()?;
             let device = scores.device();
             let mask = self.causal_mask(q_len, kv_len, device)?;
             scores = (scores + mask)?;
@@ -106,7 +107,7 @@ impl Attention {
 
     /// Attention sin cache (prefill completo).
     pub fn forward(&self, x: &Tensor, offset: usize) -> Result<Tensor> {
-        let [b, s, _] = x.dims3()?;
+        let (b, s, _) = x.dims3()?;
         let q = self.q_proj.forward(x)?.reshape((b, s, self.num_heads, self.head_dim))?;
         let k = self.k_proj.forward(x)?.reshape((b, s, self.num_kv_groups, self.head_dim))?;
         let v = self.v_proj.forward(x)?.reshape((b, s, self.num_kv_groups, self.head_dim))?;
@@ -135,7 +136,7 @@ impl Attention {
         offset: usize,
         cache: Option<&KVCache>,
     ) -> Result<(Tensor, KVCache)> {
-        let [b, s_new, _] = x.dims3()?;
+        let (b, s_new, _) = x.dims3()?;
 
         let q_new = self.q_proj.forward(x)?.reshape((b, s_new, self.num_heads, self.head_dim))?;
         let k_new = self.k_proj.forward(x)?.reshape((b, s_new, self.num_kv_groups, self.head_dim))?;

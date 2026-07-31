@@ -17,7 +17,7 @@ impl Weights {
     /// `dtype`: F32 o BF16 para los pesos.
     pub fn load(path: &str, config: &Config, dtype: candle_core::DType, device: &Device) -> Result<LLM> {
         let tensors = candle_core::safetensors::load(path, device)?;
-        let vb = VarBuilder::from_safetensors(&tensors, dtype, device);
+        let vb = VarBuilder::from_tensors(tensors, dtype, device);
         LLM::new(vb, config)
     }
 
