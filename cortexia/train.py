@@ -356,10 +356,16 @@ def main():
                     pm.log(step, loss.item(), lr_curr, tps)
 
                 if not test_mode and step % 50 == 0:
-                    t_gen = time.time()
-                    sample = generate_sample(model, tokenizer, device)
-                    gen_tps = 100 / (time.time() - t_gen)
-                    print(f"  >>> {sample}  [{gen_tps:.0f} tok/s]")
+                    print("  >>> generating sample...", flush=True)
+                    try:
+                        t_gen = time.time()
+                        sample = generate_sample(model, tokenizer, device)
+                        gen_tps = 100 / (time.time() - t_gen)
+                        print(f"  >>> {sample}  [{gen_tps:.0f} tok/s]", flush=True)
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
+                        print("  >>> SAMPLE FAILED (training continues)", flush=True)
 
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
                     state = model.state_dict()
