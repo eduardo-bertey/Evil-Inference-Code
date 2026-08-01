@@ -103,6 +103,7 @@ def main():
     test_mode = len(sys.argv) > 1 and sys.argv[1].endswith(".txt")
     txt_path = sys.argv[1] if test_mode else None
 
+    print("train.py vd554c23 | test_mode=%s" % test_mode, flush=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
@@ -266,6 +267,18 @@ def main():
 
     # ── Train loop ──────────────────────────────────────────────────────────
     model.train()
+
+    if not test_mode:
+        print("\n── Startup generation test ──", flush=True)
+        try:
+            t_gen = time.time()
+            sample = generate_sample(model, tokenizer, device)
+            print(f"  >>> {sample}  [{100/(time.time()-t_gen):.0f} tok/s]", flush=True)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+        print("── End startup test ──\n", flush=True)
+
     t0 = time.time()
     last_rpt_time = t0
     last_rpt_step = 0
