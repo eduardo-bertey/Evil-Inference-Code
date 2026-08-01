@@ -7,8 +7,10 @@ Architecture per layer:
 Also includes the full Transformer stack with final RMSNorm.
 
 Grouped shared cache:
-  - cache_every=N: cada N capas, una MLA layer produce C_KV
-  - Las capas intermedias son SharedCacheTransformerLayer con su propio W_up_kv
+  - cache_every=N: cada N capas, una MLA layer (producer) proyecta
+    Q_state, Q_rotate, K_state, V, K_rotate y las comparte con el grupo
+  - Las capas intermedias son SharedCacheTransformerLayer que leen esas
+    proyecciones del producer (sin q_proj ni W_up_kv propios)
 """
 
 import math
@@ -193,24 +195,39 @@ class TransformerLayer(nn.Module):
         h = self.residual_dropout(h)
         return residual + h
 
-    def forward_produce_cache(self, x: torch.Tensor, offset: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward for MLA producer layers: returns (output, C_KV).
+    def forward_produce_cache(self, x: torch.Tensor, offset: int = 0) -> tuple[torch.Tensor, tuple | None]:
+        """Forward for MLA producer layers: returns (output, shared_proj).
 
-        Extracts C_KV from pre-attention h (same input as MLA qkv), then runs attention.
-        C_KV is the normalized latent stored in cache for shared layers.
+        Extrae de pre-attention h (el mismo input que recibe MLA qkv) las 5
+        proyecciones compartidas para las capas del grupo:
+          (Q_state, Q_rotate_raw, K_state, V, K_rotate_raw)
+        y luego corre attention.
         """
         residual = x
         h = self.attn_norm(x)
 
-        # Extract C_KV + K_rotate_raw BEFORE attention (same h that MLA qkv receives)
         if self.use_mla and hasattr(self.attention, 'qkv'):
-            down = self.attention.qkv.W_down(h)
-            C_KV = down[:, :, self.attention.qkv.d_c1:self.attention.qkv.d_c1 + self.attention.qkv.d_c]
-            C_KV = self.attention.qkv.norm_ckv(C_KV)
-            K_rotate_raw = down[:, :, self.attention.qkv.d_c1 + self.attention.qkv.d_c:].unsqueeze(2)
+            qkv = self.attention.qkv
+            B, T, _ = x.shape
+            down = qkv.W_down(h)
+            C_Q, C_KV, K_rotate_raw = down.split([qkv.d_c1, qkv.d_c, qkv.d_rotate], dim=-1)
+            C_Q = qkv.norm_cq(C_Q)
+            C_KV = qkv.norm_ckv(C_KV)
+
+            q_up = qkv.W_up_q(C_Q)
+            Q_state, Q_rotate_raw = q_up.split([self.num_heads * self.head_dim, self.num_heads * qkv.d_rotate], dim=-1)
+            Q_state = Q_state.reshape(B, T, self.num_heads, self.head_dim)
+            Q_rotate_raw = Q_rotate_raw.reshape(B, T, self.num_heads, qkv.d_rotate)
+
+            kv_up = qkv.W_up_kv(C_KV)
+            K_state, V = kv_up.chunk(2, dim=-1)
+            K_state = K_state.reshape(B, T, self.num_kv_groups, self.head_dim)
+            V = V.reshape(B, T, self.num_kv_groups, self.head_dim)
+
+            K_rotate_raw = K_rotate_raw.unsqueeze(2)
+            shared_proj = (Q_state, Q_rotate_raw, K_state, V, K_rotate_raw)
         else:
-            C_KV = None
-            K_rotate_raw = None
+            shared_proj = None
 
         h_attn = self.attention(h, offset)
         h_attn = self.residual_dropout(h_attn)
@@ -220,7 +237,7 @@ class TransformerLayer(nn.Module):
         h = self.ffn_norm(x)
         h = self.ffn(h)
         h = self.residual_dropout(h)
-        return residual + h, C_KV, K_rotate_raw
+        return residual + h, shared_proj
 
     def forward_with_cache(
         self,
@@ -243,12 +260,12 @@ class TransformerLayer(nn.Module):
 
 
 class SharedCacheTransformerLayer(nn.Module):
-    """Capa que lee C_KV + K_rotate_raw de una cache compartida (MLA layer).
+    """Capa que lee Q/K/V ya proyectados de una cache compartida (MLA producer).
 
     Mismo scoring decoupled que MLA:
-      - Q = Q_state + Q_rotate (desde x via q_proj propio)
-      - K,V = descomprimidos de C_KV via W_up_kv propio
-      - RoPE solo en Q_rotate y K_rotate_raw (del cache)
+      - Q_state + Q_rotate, K_state + V, K_rotate_raw: todos del producer del grupo
+      - RoPE solo en Q_rotate y K_rotate_raw
+      - q_norm/k_norm/o_proj/gate_proj: propios por capa
       - score = Q_state·K_state/sqrt(d_c) + Q_rotate·K_rotate/sqrt(d_rotate)
     """
 
@@ -290,11 +307,7 @@ class SharedCacheTransformerLayer(nn.Module):
         self.use_gated_attn = use_gated_attn
         self.gated_type = gated_type
 
-        # Q projection: x -> Q_state + Q_rotate (decoupled, igual que MLA)
-        self.q_proj = nn.Linear(d_model, num_heads * head_dim + num_heads * d_rotate, bias=bias)
-
-        # K,V decompression: C_KV -> K_state, V (SUS pesos, diferentes a MLA layer)
-        self.W_up_kv = nn.Linear(d_c, 2 * num_kv_groups * head_dim, bias=bias)
+        # Q, K, V ya vienen proyectados por el MLA producer del grupo (cache)
 
         # RoPE solo para dimensiones de rotacion
         self.rope = RoPE(head_dim=d_rotate, max_seq_len=max_seq_len, base=rope_base, scaling_factor=rope_scaling)
@@ -373,27 +386,12 @@ class SharedCacheTransformerLayer(nn.Module):
         return scores
 
     def forward(self, x: torch.Tensor, cache: tuple, offset: int = 0) -> torch.Tensor:
-        """Training: lee (C_KV, K_rotate_raw) de cache compartida."""
+        """Training: lee (Q_state, Q_rotate_raw, K_state, V, K_rotate_raw) del producer."""
         B, T, _ = x.shape
         h = self.attn_norm(x)
 
-        # Q_state + Q_rotate desde x (decoupled, igual que MLA)
-        q_raw = self.q_proj(h)
-        Q_state, Q_rotate_raw = q_raw.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
-        Q_state = Q_state.reshape(B, T, self.num_heads, self.head_dim)
-        Q_rotate_raw = Q_rotate_raw.reshape(B, T, self.num_heads, self.d_rotate)
-
-        # K_state, V desde cache via SUS pesos
-        C_KV = cache[0] if isinstance(cache, tuple) else cache
-        kv_up = self.W_up_kv(C_KV)
-        K_state, V = kv_up.chunk(2, dim=-1)
-        K_state = K_state.reshape(B, T, self.num_kv_groups, self.head_dim)
-        V = V.reshape(B, T, self.num_kv_groups, self.head_dim)
-
-        # K_rotate_raw del cache (posicion, no content)
-        K_rotate_raw = cache[1] if isinstance(cache, tuple) and len(cache) > 1 else torch.zeros(B, T, 1, self.d_rotate, device=x.device)
-        if K_rotate_raw.dim() == 3:
-            K_rotate_raw = K_rotate_raw.unsqueeze(2)
+        # Q/K/V desde la cache compartida del producer del grupo
+        Q_state, Q_rotate_raw, K_state, V, K_rotate_raw = cache
 
         # RoPE solo en dimensiones de rotacion
         Q_rotate, K_rotate = self.rope(Q_rotate_raw, K_rotate_raw, offset)
@@ -435,35 +433,24 @@ class SharedCacheTransformerLayer(nn.Module):
         return x
 
     def forward_with_cache(self, x: torch.Tensor, offset: int, cache: tuple) -> torch.Tensor:
-        """Inference: lee (C_KV_full, K_rotate_raw_full) de cache compartida."""
+        """Inference: lee (Q_state, Q_rotate_raw, K_state, V, K_rotate_raw) del producer."""
         B, S_new, _ = x.shape
         h = self.attn_norm(x)
 
-        # Q_state + Q_rotate desde x
-        q_raw = self.q_proj(h)
-        Q_state, Q_rotate_raw = q_raw.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
-        Q_state = Q_state.reshape(B, S_new, self.num_heads, self.head_dim)
-        Q_rotate_raw = Q_rotate_raw.reshape(B, S_new, self.num_heads, self.d_rotate)
-
         if cache is not None:
-            C_KV_full, K_rotate_raw_full = cache
-            # Ensure K_rotate_raw is 4D: (B, T, 1, d_rotate)
-            if K_rotate_raw_full.dim() == 3:
-                K_rotate_raw_full = K_rotate_raw_full.unsqueeze(2)
-            T = C_KV_full.shape[1]
-            kv_up = self.W_up_kv(C_KV_full)
-            K_state, V = kv_up.chunk(2, dim=-1)
-            K_state = K_state.reshape(B, T, self.num_kv_groups, self.head_dim)
-            V = V.reshape(B, T, self.num_kv_groups, self.head_dim)
-            # RoPE: Q_rotate with offset, K_rotate from cache with offset=0
+            Q_state, Q_rotate_raw, K_state, V, K_rotate_raw = cache
+            T = K_state.shape[1]
+            # RoPE: Q_rotate con offset, K_rotate acumulado con offset=0
             Q_rotate = self.rope.apply_to_single(Q_rotate_raw, offset=offset)
-            K_rotate = self.rope.apply_to_single(K_rotate_raw_full, offset=0)
+            K_rotate = self.rope.apply_to_single(K_rotate_raw, offset=0)
         else:
             T = 0
+            Q_state = torch.zeros(B, S_new, self.num_heads, self.head_dim, device=x.device)
+            Q_rotate_raw = torch.zeros(B, S_new, self.num_heads, self.d_rotate, device=x.device)
+            Q_rotate = self.rope.apply_to_single(Q_rotate_raw, offset=offset)
             K_state = torch.zeros(B, 0, self.num_kv_groups, self.head_dim, device=x.device)
             V = torch.zeros(B, 0, self.num_kv_groups, self.head_dim, device=x.device)
             K_rotate = torch.zeros(B, 0, 1, self.d_rotate, device=x.device)
-            Q_rotate = self.rope.apply_to_single(Q_rotate_raw, offset=offset)
 
         if self.qk_norm:
             Q_state = self.q_norm(Q_state)
@@ -618,13 +605,13 @@ class Transformer(nn.Module):
 
         for i, layer in enumerate(self.layers):
             if self.is_cache_producer[i]:
-                # MLA layer: produce (C_KV, K_rotate_raw)
-                x, C_KV, K_rotate_raw = layer.forward_produce_cache(x, offset)
-                if C_KV is not None:
+                # MLA layer: produce (Q_state, Q_rotate_raw, K_state, V, K_rotate_raw)
+                x, shared_proj = layer.forward_produce_cache(x, offset)
+                if shared_proj is not None:
                     group_idx = self.cache_producer_indices.index(i)
-                    shared_caches[group_idx] = (C_KV, K_rotate_raw)
+                    shared_caches[group_idx] = shared_proj
             else:
-                # Shared cache layer: lee (C_KV, K_rotate_raw) de cache
+                # Shared cache layer: lee Q/K/V proyectados del producer de su grupo
                 group_idx = self._get_group_idx(i)
                 x = layer(x, shared_caches[group_idx], offset)
 
@@ -638,18 +625,21 @@ class Transformer(nn.Module):
     ) -> tuple[torch.Tensor, list]:
         """Forward with shared caches for autoregressive generation.
 
-        caches: list of C_KV per cache group, or None
+        caches: list por grupo de (mla_cache, shared_proj), o None.
         """
         num_groups = len(self.cache_producer_indices)
         new_caches = list(caches) if caches is not None else [None] * num_groups
 
         for i, layer in enumerate(self.layers):
             if self.is_cache_producer[i]:
-                # MLA layer: produce C_KV
                 group_idx = self.cache_producer_indices.index(i)
                 residual = x
-                h = layer.attn_norm(x)
-                h, new_cache = layer.attention.forward_with_cache(h, offset, new_caches[group_idx])
+                h_pre = layer.attn_norm(x)
+                if new_caches[group_idx] is not None:
+                    mla_cache = new_caches[group_idx][0]
+                else:
+                    mla_cache = None
+                h, new_mla_cache = layer.attention.forward_with_cache(h_pre, offset, mla_cache)
                 h = layer.residual_dropout(h)
                 x = residual + h
 
@@ -658,12 +648,44 @@ class Transformer(nn.Module):
                 h = layer.ffn(h)
                 x = residual + h
 
-                # Store full cache tuple (C_KV_full, K_rot_full) for MLA
-                if new_cache is not None:
-                    new_caches[group_idx] = new_cache
+                # Proyecciones compartidas para las capas del grupo
+                shared_proj = self._producer_shared_proj(layer, h_pre, new_mla_cache, new_caches[group_idx])
+                new_caches[group_idx] = (new_mla_cache, shared_proj)
             else:
-                # Shared cache layer: lee (C_KV, K_rotate_raw) del cache de su grupo
+                # Shared cache layer: lee Q/K/V del producer de su grupo
                 group_idx = self._get_group_idx(i)
-                x = layer.forward_with_cache(x, offset, new_caches[group_idx])
+                shared_cache = new_caches[group_idx][1] if new_caches[group_idx] is not None else None
+                x = layer.forward_with_cache(x, offset, shared_cache)
 
         return self.final_norm(x), new_caches
+
+    def _producer_shared_proj(self, layer, h_pre, new_mla_cache, prev_group_cache):
+        """Construye (Q_state, Q_rotate_raw, K_state, V, K_rotate_raw) del MLA producer.
+
+        Q es del token nuevo (h_pre); K_state/V/K_rotate_raw acumulan la secuencia
+        completa desde C_KV_full (ya normalizado) y el K_rotate_raw acumulado.
+        """
+        qkv = layer.attention.qkv
+        B, S_new, _ = h_pre.shape
+        down = qkv.W_down(h_pre)
+        _, _, K_rot_raw_new = down.split([qkv.d_c1, qkv.d_c, qkv.d_rotate], dim=-1)
+        C_Q_new = down[:, :, :qkv.d_c1]
+        C_Q_new = qkv.norm_cq(C_Q_new)
+        q_up = qkv.W_up_q(C_Q_new)
+        Q_state, Q_rot_raw = q_up.split([layer.num_heads * layer.head_dim, layer.num_heads * qkv.d_rotate], dim=-1)
+        Q_state = Q_state.reshape(B, S_new, layer.num_heads, layer.head_dim)
+        Q_rot_raw = Q_rot_raw.reshape(B, S_new, layer.num_heads, qkv.d_rotate)
+        K_rot_raw_new = K_rot_raw_new.unsqueeze(2)
+
+        C_KV_full = new_mla_cache[0]
+        kv_up = qkv.W_up_kv(C_KV_full)
+        K_state, V = kv_up.chunk(2, dim=-1)
+        T = C_KV_full.shape[1]
+        K_state = K_state.reshape(B, T, layer.num_kv_groups, layer.head_dim)
+        V = V.reshape(B, T, layer.num_kv_groups, layer.head_dim)
+
+        if prev_group_cache is not None:
+            K_rot_raw_full = torch.cat([prev_group_cache[1][4], K_rot_raw_new], dim=1)
+        else:
+            K_rot_raw_full = K_rot_raw_new
+        return (Q_state, Q_rot_raw, K_state, V, K_rot_raw_full)

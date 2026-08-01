@@ -62,18 +62,18 @@ num_heads = 12
 num_kv_groups = 4
 head_dim = d_model // num_heads
 seq_len = 1024
-batch_size = 4
-grad_accum = 4
-lr = 25e-5
+batch_size = 6
+grad_accum = 6
+lr = 3e-4
 num_epochs = 200000
 warmup_steps = 50
 bpe_vocab = 32000
 
 # Sandwich MLA + BMA + Gated (en TODAS las capas)
 use_mla = True
-use_gated_attn = False
+use_gated_attn = True
 gated_type = "headwise"
-use_bma = True
+use_bma = False
 use_xsa = False
 qk_norm = True
 use_sandwich_norm = True
