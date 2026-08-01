@@ -32,8 +32,10 @@ def generate_sample(model, tokenizer, device, prompt="hola", max_new=30):
     x = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
     out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40, top_p=0.9,
                          repetition_penalty=1.2)
+    ids = out[0].tolist()
+    print(f"    [ids] {ids}", flush=True)
     model.train()
-    return tokenizer.decode(out[0].tolist())
+    return tokenizer.decode(ids)
 
 
 def train_tokenizer_from_wiki(vocab_size, output_path):
