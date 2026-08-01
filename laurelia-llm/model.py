@@ -21,7 +21,7 @@ class Config:
     emb_num = 32000
     rotary_pct = 0.25
 
-    batch_size: int = 8
+    batch_size: int = 6
     grad_acc: int = 6
     learning_rate: float = 3e-4
     weight_decay: float = 0.1
