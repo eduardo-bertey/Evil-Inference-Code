@@ -120,6 +120,9 @@ def main():
 
     model.train()
     step = 0
+    stop = False
+    asked = False
+    ask_step = 30
     t0 = time.time()
     order = list(range(len(samples)))
     random.Random(1).shuffle(order)
@@ -151,8 +154,15 @@ def main():
                 print(f"s{step} loss {loss_val:.4f} grad {grad_norm:.3f} " +
                       f"{len(samples)*block_size/ (time.time()-t0):.0f}t/s")
                 if step_cap and step >= step_cap:
+                    stop = True
                     break
-        if step_cap and step >= step_cap:
+                if step == ask_step and not asked:
+                    asked = True
+                    ans = input(f"\nStep {step}. ¿Continuar entrenando (c) o guardar y chatear (g)? ").strip().lower()
+                    if ans in ("g", "chat", "guardar"):
+                        stop = True
+                        break
+        if stop:
             break
 
     sample = generate_sample(model, tokenizer, device)
