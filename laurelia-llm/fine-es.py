@@ -107,8 +107,8 @@ def main():
         print(f"Dataset en {data_path}")
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    n_examples = int(sys.argv[sys.argv.index("--examples") + 1]) if "--examples" in sys.argv else 400
-    repeats = int(sys.argv[sys.argv.index("--repeats") + 1]) if "--repeats" in sys.argv else 6
+    n_examples = int(sys.argv[sys.argv.index("--examples") + 1]) if "--examples" in sys.argv else 15000
+    repeats = int(sys.argv[sys.argv.index("--repeats") + 1]) if "--repeats" in sys.argv else 1
     step_cap = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 0
     batch_size = 6
     grad_acc = 6
