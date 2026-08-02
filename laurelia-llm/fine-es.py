@@ -59,11 +59,11 @@ def build_sample(ex, tok, eos_id, block_size):
 
 
 @torch.no_grad()
-def generate_sample(model, tokenizer, device, prompt="hola", max_new=40):
+def generate_sample(model, tokenizer, device, prompt="hola", max_new=40, eos_id=None):
     model.eval()
     x = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
     out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40,
-                         top_p=0.9, repetition_penalty=1.2)
+                         top_p=0.9, repetition_penalty=1.2, eos_token_id=eos_id)
     model.train()
     return tokenizer.decode(out[0].tolist())
 
@@ -152,14 +152,15 @@ def main():
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     n_examples = int(sys.argv[sys.argv.index("--examples") + 1]) if "--examples" in sys.argv else 15000
+    skip = int(sys.argv[sys.argv.index("--skip") + 1]) if "--skip" in sys.argv else 0
     repeats = int(sys.argv[sys.argv.index("--repeats") + 1]) if "--repeats" in sys.argv else 1
     step_cap = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 0
     batch_size = 6
     grad_acc = 6
-    print(f"Ejemplos: {n_examples} | repeats: {repeats} | bs: {batch_size} | ga: {grad_acc}")
+    print(f"Ejemplos: {n_examples} | skip: {skip} | repeats: {repeats} | bs: {batch_size} | ga: {grad_acc}")
 
-    samples = [build_sample(ex, tokenizer, eos_id, block_size) for ex in data[:n_examples]]
-    raw = data[:n_examples]
+    samples = [build_sample(ex, tokenizer, eos_id, block_size) for ex in data[skip:skip + n_examples]]
+    raw = data[skip:skip + n_examples]
     print(f"Muestras preparadas: {len(samples)}")
 
     model.train()
@@ -200,7 +201,7 @@ def main():
                 r = raw[(step - 1) % len(raw)]
                 print(f"  [{step}] Q: {r.get('instruction','')[:80]!r} -> A: {r.get('output','')[:80]!r}")
                 q = r.get("instruction", "")
-                gen = generate_sample(model, tokenizer, device, prompt=chat_prompt(q, ""), max_new=40)
+                gen = generate_sample(model, tokenizer, device, prompt=chat_prompt(q, ""), max_new=40, eos_id=eos_id)
                 print(f"  [{step}] GEN: {gen!r}")
                 if step_cap and step >= step_cap:
                     stop = True
@@ -214,7 +215,7 @@ def main():
         if stop:
             break
 
-    sample = generate_sample(model, tokenizer, device)
+    sample = generate_sample(model, tokenizer, device, eos_id=eos_id)
     print(f"  >>> {sample}")
 
     fine_path = os.path.join(_DIR, "fine-checkpoint.pt")
