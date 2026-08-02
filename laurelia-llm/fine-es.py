@@ -68,15 +68,24 @@ def generate_sample(model, tokenizer, device, prompt="hola", max_new=40):
     return tokenizer.decode(out[0].tolist())
 
 
+def chat_loop(model, tokenizer, device, eos_id):
+    model.eval()
+    print("\n=== CHAT (fine-checkpoint) ===")
+    while True:
+        p = input("\n> ")
+        if p.strip().lower() in ("exit", "salir", "quit"):
+            break
+        prompt_ids = tokenizer.encode(chat_prompt(p, ""))
+        x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
+        out = model.generate(x, max_new_tokens=150, temperature=0.7, top_k=40,
+                             top_p=0.9, repetition_penalty=1.2, eos_token_id=eos_id)
+        gen = out[0][len(prompt_ids):].tolist()
+        print(tokenizer.decode(gen))
+
+
 def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    prec = input("Precision (n=f32, b=bf16): ").strip().lower()
-    dtype = torch.bfloat16 if prec == "b" else torch.float32
-    print(f"  Compute: {dtype}")
-
-    hf = HFManager(repo_id=REPO, revision=REV)
-    hf._get_token()
 
     tok_path = os.path.join(_DIR, "tokenizer.json")
     if not os.path.exists(tok_path):
@@ -84,6 +93,37 @@ def main():
     tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
     eos_id = tokenizer.tokenizer.token_to_id("eos_token")
     print(f"Vocab: {tokenizer.vocab_size}  eos_id: {eos_id}")
+
+    fine_path = os.path.join(_DIR, "fine-checkpoint.pt")
+
+    mode = "e"
+    if os.path.exists(fine_path):
+        ans = input("¿Entrenar (e) o inferir (i)? [e]: ").strip().lower()
+        if ans in ("i", "inferir", "infer", "chat"):
+            mode = "i"
+        else:
+            mode = "e"
+    else:
+        print("No hay fine-checkpoint.pt; modo entrenar.")
+
+    if mode == "i":
+        ckpt = torch.load(fine_path, map_location="cpu")
+        config = Config()
+        config.emb_num = tokenizer.vocab_size
+        model = LLM(config).to(device)
+        ckpt["model"].pop("head.emb_weight", None)
+        model.load_state_dict(ckpt["model"], strict=False)
+        del ckpt
+        print(f"Fine-checkpoint cargado: {fine_path}")
+        chat_loop(model, tokenizer, device, eos_id)
+        return
+
+    prec = input("Precision (n=f32, b=bf16): ").strip().lower()
+    dtype = torch.bfloat16 if prec == "b" else torch.float32
+    print(f"  Compute: {dtype}")
+
+    hf = HFManager(repo_id=REPO, revision=REV)
+    hf._get_token()
 
     config = Config()
     config.emb_num = tokenizer.vocab_size
@@ -185,18 +225,7 @@ def main():
     print(f"Subiendo fine-checkpoint.pt a {REPO}@{REV} ...")
     hf.upload_checkpoint(fine_path, tokenizer_path=tok_path, step=step)
 
-    print("\n=== CHAT (fine-checkpoint) ===")
-    model.eval()
-    while True:
-        p = input("\n> ")
-        if p.strip().lower() in ("exit", "salir", "quit"):
-            break
-        prompt_ids = tokenizer.encode(chat_prompt(p, ""))
-        x = torch.tensor([prompt_ids], dtype=torch.long, device=device)
-        out = model.generate(x, max_new_tokens=150, temperature=0.7, top_k=40,
-                             top_p=0.9, repetition_penalty=1.2, eos_token_id=eos_id)
-        gen = out[0][len(prompt_ids):].tolist()
-        print(tokenizer.decode(gen))
+    chat_loop(model, tokenizer, device, eos_id)
 
 
 if __name__ == "__main__":
