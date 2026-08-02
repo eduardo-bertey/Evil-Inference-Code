@@ -48,10 +48,13 @@ def build_sample(ex, tok, eos_id, block_size):
     out = ex.get("output", "")
     prompt_ids = tok.encode(chat_prompt(inst, inp))
     resp_ids = tok.encode(out)
-    if eos_id is not None:
-        resp_ids = resp_ids + [eos_id]
-    x = (prompt_ids + resp_ids)[:block_size]
-    y = ([-100] * len(prompt_ids) + resp_ids)[:block_size]
+    resp_full = resp_ids + ([eos_id] if eos_id is not None else [])
+    x = (prompt_ids + resp_full)[:block_size]
+    y = [-100] * len(x)
+    for k, t in enumerate(resp_full):
+        pos = len(prompt_ids) - 1 + k
+        if 0 <= pos < len(y):
+            y[pos] = t
     return x, y
 
 
@@ -156,6 +159,9 @@ def main():
                       f"{len(samples)*block_size/ (time.time()-t0):.0f}t/s")
                 r = raw[(step - 1) % len(raw)]
                 print(f"  [{step}] Q: {r.get('instruction','')[:80]!r} -> A: {r.get('output','')[:80]!r}")
+                q = r.get("instruction", "")
+                gen = generate_sample(model, tokenizer, device, prompt=chat_prompt(q, ""), max_new=40)
+                print(f"  [{step}] GEN: {gen!r}")
                 if step_cap and step >= step_cap:
                     stop = True
                     break
