@@ -108,10 +108,11 @@ def main():
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     n_examples = int(sys.argv[sys.argv.index("--examples") + 1]) if "--examples" in sys.argv else 400
-    n_steps = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 60
+    repeats = int(sys.argv[sys.argv.index("--repeats") + 1]) if "--repeats" in sys.argv else 6
+    step_cap = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 0
     batch_size = 6
     grad_acc = 6
-    print(f"Ejemplos: {n_examples} | steps: {n_steps} | bs: {batch_size} | ga: {grad_acc}")
+    print(f"Ejemplos: {n_examples} | repeats: {repeats} | bs: {batch_size} | ga: {grad_acc}")
 
     samples = [build_sample(ex, tokenizer, eos_id, block_size) for ex in data[:n_examples]]
     print(f"Muestras preparadas: {len(samples)}")
@@ -119,11 +120,12 @@ def main():
     model.train()
     step = 0
     t0 = time.time()
-    order = random.Random(1).sample(range(len(samples)), len(samples))
-    while step < n_steps:
+    order = list(range(len(samples)))
+    random.Random(1).shuffle(order)
+    for pass_i in range(1, repeats + 1):
+        random.Random(pass_i).shuffle(order)
+        mb_count = 0
         for idx in range(0, len(order), batch_size):
-            if step >= n_steps:
-                break
             mb = order[idx:idx + batch_size]
             xs, ys = [], []
             max_len = max(len(samples[i][0]) for i in mb)
@@ -139,14 +141,18 @@ def main():
             (loss / grad_acc).backward()
             loss_val = loss.item()
             del logits, loss
-            if (idx // batch_size + 1) % grad_acc == 0:
+            mb_count += 1
+            if mb_count % grad_acc == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
                 step += 1
                 print(f"s{step} loss {loss_val:.4f} grad {grad_norm:.3f} " +
                       f"{len(samples)*block_size/ (time.time()-t0):.0f}t/s")
-        random.Random(step).shuffle(order)
+                if step_cap and step >= step_cap:
+                    break
+        if step_cap and step >= step_cap:
+            break
 
     sample = generate_sample(model, tokenizer, device)
     print(f"  >>> {sample}")
