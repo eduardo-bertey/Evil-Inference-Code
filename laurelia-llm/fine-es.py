@@ -116,6 +116,7 @@ def main():
     print(f"Ejemplos: {n_examples} | repeats: {repeats} | bs: {batch_size} | ga: {grad_acc}")
 
     samples = [build_sample(ex, tokenizer, eos_id, block_size) for ex in data[:n_examples]]
+    raw = data[:n_examples]
     print(f"Muestras preparadas: {len(samples)}")
 
     model.train()
@@ -153,6 +154,8 @@ def main():
                 step += 1
                 print(f"s{step} loss {loss_val:.4f} grad {grad_norm:.3f} " +
                       f"{len(samples)*block_size/ (time.time()-t0):.0f}t/s")
+                r = raw[(step - 1) % len(raw)]
+                print(f"  [{step}] Q: {r.get('instruction','')[:80]!r} -> A: {r.get('output','')[:80]!r}")
                 if step_cap and step >= step_cap:
                     stop = True
                     break
