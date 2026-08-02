@@ -84,8 +84,9 @@ def main():
 
     config = Config()
     config.emb_num = tokenizer.vocab_size
+    lr = float(sys.argv[sys.argv.index("--lr") + 1]) if "--lr" in sys.argv else 3e-5
     model = LLM(config).to(device).to(dtype)
-    optimizer = model.configure_optimizers(0.1, 3e-4, (0.9, 0.95), "cuda")
+    optimizer = model.configure_optimizers(0.1, lr, (0.9, 0.95), "cuda")
 
     ckpt_path = os.path.join(_DIR, "checkpoint.pt")
     if os.path.exists(ckpt_path):
