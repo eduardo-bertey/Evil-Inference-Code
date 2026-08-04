@@ -40,12 +40,13 @@ def main():
             history[model] = []
 
     fig, ax = plt.subplots(figsize=(10, 5))
+    colors = {"laurelia-llm": "tab:blue", "filosofia": "tab:orange", "moe-mla": "tab:green"}
     for model, entries in history.items():
         if not entries:
             continue
         steps = [e["step"] for e in entries]
         losses = [e["loss"] for e in entries]
-        ax.plot(steps, losses, label=model, linewidth=1.2)
+        ax.plot(steps, losses, label=model, linewidth=1.2, color=colors.get(model))
     ax.set_xlabel("step")
     ax.set_ylabel("loss")
     ax.set_title("Train loss: laurelia-llm vs filosofia vs moe-mla")
@@ -56,11 +57,14 @@ def main():
     print(f"Saved {args.out}")
 
     if not args.no_upload:
+        import getpass
         api = HfApi()
         token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
         if not token:
-            import getpass
-            token = getpass.getpass("HF token: ").strip()
+            print(f"\nNo HF token found. Enter token for {REPO} (write access):")
+            token = getpass.getpass("Token: ").strip()
+            if not token:
+                raise ValueError("Token requerido para subir a HuggingFace")
         api.create_branch(repo_id=REPO, branch=BRANCH, token=token)
         api.upload_file(
             path_or_fileobj=args.out,
