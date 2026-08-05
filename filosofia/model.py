@@ -258,10 +258,15 @@ class LLM(nn.Module):
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        k_params = [p for n, p in param_dict.items() if n.endswith("kv_proj.weight")]
+        other_decay_params = [
+            p for n, p in param_dict.items()
+            if p.dim() >= 2 and not n.endswith("kv_proj.weight")
+        ]
         nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
         optim_groups = [
-            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": k_params, "weight_decay": weight_decay, "lr_scale": 0.5},
+            {"params": other_decay_params, "weight_decay": weight_decay},
             {"params": nodecay_params, "weight_decay": 0.0},
         ]
         fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
