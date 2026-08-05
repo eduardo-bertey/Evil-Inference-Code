@@ -65,7 +65,10 @@ def main():
             token = getpass.getpass("Token: ").strip()
             if not token:
                 raise ValueError("Token requerido para subir a HuggingFace")
-        api.create_branch(repo_id=REPO, branch=BRANCH, token=token)
+        try:
+            api.create_branch(repo_id=REPO, branch=BRANCH, token=token)
+        except Exception as e:
+            print(f"Branch {BRANCH} ya existe o no se pudo crear ({e}); sigo con upload")
         api.upload_file(
             path_or_fileobj=args.out,
             path_in_repo=os.path.basename(args.out),
