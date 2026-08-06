@@ -127,6 +127,7 @@ def main():
 
     config = Config()
     config.emb_num = tokenizer.vocab_size
+    config.block_size = 512
     lr = float(sys.argv[sys.argv.index("--lr") + 1]) if "--lr" in sys.argv else 3e-5
     model = LLM(config).to(device).to(dtype)
     optimizer = model.configure_optimizers(0.1, lr, (0.9, 0.95), "cuda")
@@ -151,12 +152,12 @@ def main():
         print(f"Dataset en {data_path}")
     with open(data_path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    n_examples = int(sys.argv[sys.argv.index("--examples") + 1]) if "--examples" in sys.argv else 15000
+    n_examples = int(sys.argv[sys.argv.index("--examples") + 1]) if "--examples" in sys.argv else len(data)
     skip = int(sys.argv[sys.argv.index("--skip") + 1]) if "--skip" in sys.argv else 0
     repeats = int(sys.argv[sys.argv.index("--repeats") + 1]) if "--repeats" in sys.argv else 1
     step_cap = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 0
-    batch_size = 6
-    grad_acc = 6
+    batch_size = 8
+    grad_acc = 8
     print(f"Ejemplos: {n_examples} | skip: {skip} | repeats: {repeats} | bs: {batch_size} | ga: {grad_acc}")
 
     samples = [build_sample(ex, tokenizer, eos_id, block_size) for ex in data[skip:skip + n_examples]]
