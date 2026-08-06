@@ -170,9 +170,11 @@ class StreamingDataset:
                 self._wiki_iter = self._new_wiki_iter()
                 self._wiki_block_idx = 0
             skip_blocks = max(0, self.block_idx - self._wiki_block_idx)
+            print(f"  Descargando wiki (bloque {self.block_idx}, {self.block_mb}MB)...")
             written, exhausted = self._download_block_from_iterator(self._wiki_iter, skip_blocks, self._path)
             self._wiki_block_idx = self.block_idx + 1
         else:
+            print(f"  Descargando wiki (prefetch bloque {self.block_idx}, {self.block_mb}MB)...")
             written, exhausted = self._download_block_from_iterator(iterator, self.block_idx, self._path)
 
         if exhausted:
@@ -191,6 +193,7 @@ class StreamingDataset:
                 if mb <= 0:
                     continue
                 mix_bytes = int(mb * 1024 * 1024)
+                print(f"  Descargando {label} (bloque {self.block_idx}, {mb}MB)...")
                 if self._mix_block_idx.get(label, 0) > self.block_idx:
                     self._mix_iters[label] = None
                     self._mix_block_idx[label] = 0
