@@ -173,9 +173,11 @@ class StreamingDataset:
             print(f"  Descargando wiki (bloque {self.block_idx}, {self.block_mb}MB)...")
             written, exhausted = self._download_block_from_iterator(self._wiki_iter, skip_blocks, self._path)
             self._wiki_block_idx = self.block_idx + 1
+            print(f"  Escrito wiki: {written} bytes")
         else:
             print(f"  Descargando wiki (prefetch bloque {self.block_idx}, {self.block_mb}MB)...")
             written, exhausted = self._download_block_from_iterator(iterator, self.block_idx, self._path)
+            print(f"  Escrito wiki: {written} bytes")
 
         if exhausted:
             print(f"  Wikipedia stream exhausted while downloading block {self.block_idx}, wrapping on next block")
