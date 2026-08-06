@@ -13,8 +13,8 @@ TRAIN_DATA_PATH = os.path.join(_DIR, "wiki_train_data.txt")
 
 # (dataset config, megabytes per block, label)
 DEFAULT_MIXES = [
-    (FINEWEB_CONFIG, 2.0, "FineWeb2-HQ"),
-    (TWEETS_CONFIG, 1.0, "Spanish Tweets"),
+    (FINEWEB_CONFIG, 2.0, "fine"),
+    (TWEETS_CONFIG, 1.0, "tuit"),
 ]
 
 
