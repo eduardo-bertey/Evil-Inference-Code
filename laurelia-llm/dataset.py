@@ -196,9 +196,6 @@ class StreamingDataset:
                     continue
                 mix_bytes = int(mb * 1024 * 1024)
                 print(f"  Descargando {label} (bloque {self.block_idx}, {mb}MB)...")
-                if self._mix_block_idx.get(label, 0) > self.block_idx:
-                    self._mix_iters[label] = None
-                    self._mix_block_idx[label] = 0
                 self._ensure_mix_iter(label)
                 skip = max(0, self.block_idx - self._mix_block_idx.get(label, 0))
                 it = self._mix_iters.get(label)
