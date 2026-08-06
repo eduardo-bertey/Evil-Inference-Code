@@ -1,4 +1,4 @@
-"""Dataset handling: download Wikipedia ES and Spanish FineWeb2-HQ training data."""
+"""Dataset handling: training blocks (Wiki ES 3MB + FineWeb2-HQ 2MB + Spanish Tweets 1MB)."""
 
 import os, threading
 from typing import Optional
@@ -7,8 +7,15 @@ from datasets import load_dataset
 _DIR = os.path.dirname(os.path.abspath(__file__))
 WIKI_CONFIG = ("wikimedia/wikipedia", "20231101.es")
 FINEWEB_CONFIG = ("epfml/FineWeb2-HQ", "spa_Latn")
+TWEETS_CONFIG = "pysentimiento/spanish-tweets"
 TOKENIZER_DATA_PATH = os.path.join(_DIR, "wiki_tokenizer_50mb.txt")
 TRAIN_DATA_PATH = os.path.join(_DIR, "wiki_train_data.txt")
+
+# (dataset config, megabytes per block, label)
+DEFAULT_MIXES = [
+    (FINEWEB_CONFIG, 2.0, "FineWeb2-HQ"),
+    (TWEETS_CONFIG, 1.0, "Spanish Tweets"),
+]
 
 
 def download_wikipedia_50mb(output_path: str = TOKENIZER_DATA_PATH) -> str:
@@ -33,8 +40,10 @@ def download_wikipedia_50mb(output_path: str = TOKENIZER_DATA_PATH) -> str:
 class StreamingDataset:
     """Stream training data in blocks via persistent iterators.
     
-    Both Wikipedia and FineWeb2-HQ use persistent load_dataset(streaming=True)
-    iterators — they are created once and kept across blocks. No skip, no recreate.
+    WikiES is the main block (3MB). Each mix (FineWeb2-HQ 2MB, Spanish Tweets 1MB)
+    appends its own bytes to the block via a persistent iterator. A mix block_idx is
+    fixed per selected block, so requesting block N downloads block N of wiki, N of
+    FineWeb and N of Tweets (no repetition within a pass), like the original design.
     Prefetch thread downloads the next block while training runs on current block.
     """
     def __init__(
@@ -44,6 +53,7 @@ class StreamingDataset:
         mezcla: bool = True,
         mix_mb: float = 1.0,
         mix_dataset: Optional[tuple[str, str] | str] = None,
+        mixes: Optional[list] = None,
     ):
         self.block_mb = block_mb
         self.block_idx = block_idx
@@ -53,11 +63,18 @@ class StreamingDataset:
         self.mezcla = mezcla
         self.mix_mb = mix_mb
         self.mix_dataset = mix_dataset if mix_dataset is not None else FINEWEB_CONFIG
-        # Persistent streaming iterators (created once, live forever)
+        if mixes is None:
+            if self.mix_dataset == FINEWEB_CONFIG:
+                mixes = DEFAULT_MIXES
+            else:
+                mixes = [(self.mix_dataset, self.mix_mb, "mix")]
+        self.mixes = mixes
+        # label -> (iter, block_idx)
+        self._mix_iters: dict[str, Optional[object]] = {}
+        self._mix_block_idx: dict[str, int] = {}
+        # Persistent streaming iterator for main block (created once, lives forever)
         self._wiki_iter = None
         self._wiki_block_idx = 0
-        self._fineweb_iter = None
-        self._fineweb_block_idx = 0
         # Prefetch
         self._prefetch_thread: threading.Thread | None = None
         self._prefetch_error: Exception | None = None
@@ -67,21 +84,31 @@ class StreamingDataset:
             ds = load_dataset(*WIKI_CONFIG, split="train", streaming=True)
             self._wiki_iter = iter(ds)
 
-    def _ensure_fineweb_iter(self):
-        if self._fineweb_iter is None and self.mix_dataset is not None:
-            if isinstance(self.mix_dataset, (tuple, list)):
-                ds = load_dataset(*self.mix_dataset, split="train", streaming=True)
-            else:
-                ds = load_dataset(self.mix_dataset, split="train", streaming=True)
-            self._fineweb_iter = iter(ds)
+    def _ensure_mix_iter(self, label: str):
+        if label in self._mix_iters:
+            return
+        ds_config = None
+        for cfg, _, f in self.mixes:
+            if f == label:
+                ds_config = cfg
+                break
+        if ds_config is None:
+            self._mix_iters[label] = None
+            return
+        if isinstance(ds_config, (tuple, list)):
+            ds = load_dataset(*ds_config, split="train", streaming=True)
+        else:
+            ds = load_dataset(ds_config, split="train", streaming=True)
+        self._mix_iters[label] = iter(ds)
 
-    def _read_from_fineweb_iter(self, max_bytes: int):
-        self._ensure_fineweb_iter()
-        if self._fineweb_iter is None:
+    def _read_from_mix_iter(self, label: str, max_bytes: int):
+        self._ensure_mix_iter(label)
+        it = self._mix_iters.get(label)
+        if it is None:
             return [], 0
         texts = []
         appended = 0
-        for item in self._fineweb_iter:
+        for item in it:
             text = item.get("text") if isinstance(item, dict) else str(item)
             tam = len(text.encode("utf-8"))
             if appended + tam > max_bytes:
@@ -89,14 +116,11 @@ class StreamingDataset:
             texts.append(text)
             appended += tam
         if appended == 0:
-            if self._fineweb_iter is not None:
-                print(f"  FineWeb2-HQ stream exhausted, wrapping to block {self.block_idx}")
-            self._fineweb_iter = None
-            self._fineweb_block_idx = 0
-            self._ensure_fineweb_iter()
-            if self._fineweb_iter is None:
-                return [], 0
-            return self._read_from_fineweb_iter(max_bytes)
+            print(f"  {label} stream exhausted, wrapping to block 0")
+            self._mix_iters[label] = None
+            self._mix_block_idx[label] = 0
+            self._ensure_mix_iter(label)
+            return self._read_from_mix_iter(label, max_bytes)
         return texts, appended
 
     def _new_wiki_iter(self):
@@ -156,39 +180,48 @@ class StreamingDataset:
             self._wiki_iter = None
             self._wiki_block_idx = 0
 
-        if getattr(self, "mezcla", False) and self.mix_mb > 0:
-            self._append_fineweb_maybe(mix_path)
+        if getattr(self, "mezcla", False) and self.mixes:
+            self._append_mix_maybe(mix_path)
 
-    def _append_fineweb_maybe(self, mix_path=None):
-        if not getattr(self, "mezcla", False) or self.mix_mb <= 0:
+    def _append_mix_maybe(self, mix_path=None):
+        if not getattr(self, "mezcla", False) or not self.mixes:
             return
-        mix_bytes = int(self.mix_mb * 1024 * 1024)
         try:
-            self._ensure_fineweb_iter()
-            skip_fw = max(0, self.block_idx - self._fineweb_block_idx)
-            for _ in range(skip_fw):
-                written_fw = 0
-                for item in self._fineweb_iter:
-                    text = item.get("text") if isinstance(item, dict) else str(item)
-                    tam = len(text.encode("utf-8"))
-                    if written_fw + tam > mix_bytes:
-                        break
-                    written_fw += tam
-                if written_fw == 0:
-                    self._fineweb_iter = None
-                    self._fineweb_block_idx = 0
-                    break
-            texts, appended = self._read_from_fineweb_iter(mix_bytes)
-            if texts:
-                out_path = mix_path or self._path
-                with open(out_path, "a", encoding="utf-8") as f:
-                    for t in texts:
-                        f.write(t)
-                        f.write("\n\n")
-                self._fineweb_block_idx = self.block_idx + 1
-                print(f"  Appended {appended} bytes from FineWeb2-HQ for block {self.block_idx}")
+            for cfg, mb, label in self.mixes:
+                if mb <= 0:
+                    continue
+                mix_bytes = int(mb * 1024 * 1024)
+                self._ensure_mix_iter(label)
+                skip = max(0, self.block_idx - self._mix_block_idx.get(label, 0))
+                it = self._mix_iters.get(label)
+                if it is None:
+                    continue
+                for _ in range(skip):
+                    written = 0
+                    for item in it:
+                        text = item.get("text") if isinstance(item, dict) else str(item)
+                        tam = len(text.encode("utf-8"))
+                        if written + tam > mix_bytes:
+                            break
+                        written += tam
+                    if written == 0:
+                        self._mix_iters[label] = None
+                        self._mix_block_idx[label] = 0
+                        self._ensure_mix_iter(label)
+                        it = self._mix_iters.get(label)
+                        if it is None:
+                            break
+                texts, appended = self._read_from_mix_iter(label, mix_bytes)
+                if texts:
+                    out_path = mix_path or self._path
+                    with open(out_path, "a", encoding="utf-8") as f:
+                        for t in texts:
+                            f.write(t)
+                            f.write("\n\n")
+                    self._mix_block_idx[label] = self.block_idx + 1
+                    print(f"  Appended {appended} bytes from {label} for block {self.block_idx}")
         except Exception as e:
-            print(f"  FineWeb mixing skipped: {e}")
+            print(f"  Mixing skipped: {e}")
 
     def _prefetch_worker(self, block_idx: int):
         old_block = self.block_idx
