@@ -262,6 +262,7 @@ class StreamingDataset:
         with open(self._path, "r", encoding="utf-8") as f:
             text = f.read()
         self._tokens = self._tokenizer.encode(text)
+        print(f"  Bytes bloque {self.block_idx}: {len(text.encode('utf-8'))} | tokens ids: {len(self._tokens)}")
 
     def load_tokens(self, tokenizer):
         self._tokenizer = tokenizer
