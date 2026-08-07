@@ -193,12 +193,12 @@ class StreamingDataset:
     def _append_mix_maybe(self, mix_path=None):
         if not getattr(self, "mezcla", False) or not self.mixes:
             return
-        try:
-            for cfg, mb, label in self.mixes:
-                if mb <= 0:
-                    continue
-                mix_bytes = int(mb * 1024 * 1024)
-                print(f"  Descargando {label} (bloque {self.block_idx}, {mb}MB)...")
+        for cfg, mb, label in self.mixes:
+            if mb <= 0:
+                continue
+            mix_bytes = int(mb * 1024 * 1024)
+            print(f"  Descargando {label} (bloque {self.block_idx}, {mb}MB)...")
+            try:
                 self._ensure_mix_iter(label)
                 skip = max(0, self.block_idx - self._mix_block_idx.get(label, 0))
                 it = self._mix_iters.get(label)
@@ -228,8 +228,10 @@ class StreamingDataset:
                             f.write("\n\n")
                     self._mix_block_idx[label] = self.block_idx + 1
                     print(f"  Appended {appended} bytes from {label} for block {self.block_idx}")
-        except Exception as e:
-            print(f"  Mixing skipped: {e}")
+                else:
+                    print(f"  {label}: 0 bytes (vacío/agotado)")
+            except Exception as e:
+                print(f"  Mixing skipped {label}: {e}")
 
     def _prefetch_worker(self, block_idx: int):
         old_block = self.block_idx
