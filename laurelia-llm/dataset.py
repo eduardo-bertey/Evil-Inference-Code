@@ -251,8 +251,10 @@ class StreamingDataset:
 
     def _wait_prefetch(self):
         if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join()
-            self._prefetch_thread = None
+            self._prefetch_thread.join(timeout=180)
+            if self._prefetch_thread.is_alive():
+                print("  Prefetch sigue descargando en background; no se espera (evita cuelgue)")
+                self._prefetch_thread = None
         if self._prefetch_error is not None:
             err = self._prefetch_error
             self._prefetch_error = None
