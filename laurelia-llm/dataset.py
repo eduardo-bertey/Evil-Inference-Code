@@ -264,6 +264,17 @@ class StreamingDataset:
         self._prefetch_thread = threading.Thread(target=self._prefetch_worker, args=(block_idx,), daemon=True)
         self._prefetch_thread.start()
 
+    def _expected_bytes(self) -> int:
+        exp = int(self.block_mb * 1024 * 1024)
+        if self.mezcla and self.mixes:
+            exp += sum(int(mb * 1024 * 1024) for _, mb, _ in self.mixes if mb > 0)
+        return exp
+
+    def _block_file_ok(self, path: str) -> bool:
+        if not os.path.exists(path):
+            return False
+        return os.path.getsize(path) >= int(self._expected_bytes() * 0.8)
+
     def _load_tokens_from_file(self):
         with open(self._path, "r", encoding="utf-8") as f:
             text = f.read()
@@ -272,7 +283,7 @@ class StreamingDataset:
 
     def load_tokens(self, tokenizer):
         self._tokenizer = tokenizer
-        if not os.path.exists(self._path):
+        if not self._block_file_ok(self._path):
             self.download_block()
         self._load_tokens_from_file()
         print(f"Loaded {len(self._tokens)} tokens from block {self.block_idx}")
@@ -286,7 +297,7 @@ class StreamingDataset:
         self._tokens = None
         self.block_idx += 1
         self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
-        if not os.path.exists(self._path):
+        if not self._block_file_ok(self._path):
             self.download_block()
         self._load_tokens_from_file()
         if len(self._tokens) < 1000:
@@ -295,7 +306,7 @@ class StreamingDataset:
             self.block_idx = 0
             self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
             self._wiki_iter = None
-            if not os.path.exists(self._path):
+            if not self._block_file_ok(self._path):
                 self.download_block()
             self._load_tokens_from_file()
         print(f"  Loaded block {self.block_idx}: {len(self._tokens)} tokens")
