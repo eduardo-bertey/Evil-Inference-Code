@@ -186,6 +186,9 @@ class StreamingDataset:
 
         if getattr(self, "mezcla", False) and self.mixes:
             self._append_mix_maybe(mix_path)
+        total = os.path.getsize(self._path)
+        exp = self.block_mb + sum(mb for _, mb, _ in self.mixes if mb > 0)
+        print(f"  BLOQUE {self.block_idx} total: {total} bytes (~{total/2**20:.1f}MB esperado ~{exp:.0f}MB)")
 
     def _append_mix_maybe(self, mix_path=None):
         if not getattr(self, "mezcla", False) or not self.mixes:
