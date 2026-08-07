@@ -116,11 +116,9 @@ class StreamingDataset:
             texts.append(text)
             appended += tam
         if appended == 0:
-            print(f"  {label} stream exhausted, wrapping to block 0")
+            print(f"  {label} stream vacío, se recicla para el próximo bloque")
             self._mix_iters[label] = None
             self._mix_block_idx[label] = 0
-            self._ensure_mix_iter(label)
-            return self._read_from_mix_iter(label, max_bytes)
         return texts, appended
 
     def _new_wiki_iter(self):
@@ -242,7 +240,7 @@ class StreamingDataset:
             if not os.path.exists(path):
                 self.block_idx = block_idx
                 self._path = path
-                self.download_block(iterator=self._new_wiki_iter())
+                self.download_block()
         except Exception as e:
             self._prefetch_error = e
         finally:
@@ -251,10 +249,8 @@ class StreamingDataset:
 
     def _wait_prefetch(self):
         if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
-            self._prefetch_thread.join(timeout=180)
-            if self._prefetch_thread.is_alive():
-                print("  Prefetch sigue descargando en background; no se espera (evita cuelgue)")
-                self._prefetch_thread = None
+            self._prefetch_thread.join()
+            self._prefetch_thread = None
         if self._prefetch_error is not None:
             err = self._prefetch_error
             self._prefetch_error = None
@@ -262,6 +258,9 @@ class StreamingDataset:
 
     def _start_prefetch(self, block_idx: int):
         self._wait_prefetch()
+        if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
+            print(f"  Prefetch previo aún activo; no se inicia otro")
+            return
         self._prefetch_thread = threading.Thread(target=self._prefetch_worker, args=(block_idx,), daemon=True)
         self._prefetch_thread.start()
 
@@ -280,11 +279,11 @@ class StreamingDataset:
         self._start_prefetch(self.block_idx + 1)
 
     def next_block(self):
+        self._wait_prefetch()
         old_path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
         if os.path.exists(old_path):
             os.remove(old_path)
         self._tokens = None
-        self._wait_prefetch()
         self.block_idx += 1
         self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
         if not os.path.exists(self._path):
