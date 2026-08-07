@@ -127,7 +127,7 @@ class StreamingDataset:
 
     def _download_block_from_iterator(self, iterator, skip_blocks: int, path: str) -> tuple[int, bool]:
         max_bytes = int(self.block_mb * 1024 * 1024)
-        for _ in range(skip_blocks):
+        for b in range(skip_blocks):
             written = 0
             saw_item = False
             for item in iterator:
@@ -143,6 +143,8 @@ class StreamingDataset:
             if not saw_item:
                 print(f"  Wikipedia stream exhausted while skipping blocks")
                 return 0, True
+            if (b + 1) % 20 == 0 or b + 1 == skip_blocks:
+                print(f"  wiki skip {b + 1}/{skip_blocks} bloques (~{(b + 1) * self.block_mb:.0f}MB descargados)")
 
         written = 0
         exhausted = True
@@ -191,32 +193,17 @@ class StreamingDataset:
     def _append_mix_maybe(self, mix_path=None):
         if not getattr(self, "mezcla", False) or not self.mixes:
             return
-        for cfg, mb, label in self.mixes:
+        for _, mb, label in self.mixes:
             if mb <= 0:
                 continue
             mix_bytes = int(mb * 1024 * 1024)
             print(f"  Descargando {label} (bloque {self.block_idx}, {mb}MB)...")
             try:
                 self._ensure_mix_iter(label)
-                skip = max(0, self.block_idx - self._mix_block_idx.get(label, 0))
                 it = self._mix_iters.get(label)
                 if it is None:
+                    print(f"  {label}: no se pudo crear el stream")
                     continue
-                for _ in range(skip):
-                    written = 0
-                    for item in it:
-                        text = item.get("text") if isinstance(item, dict) else str(item)
-                        tam = len(text.encode("utf-8"))
-                        if written + tam > mix_bytes:
-                            break
-                        written += tam
-                    if written == 0:
-                        self._mix_iters[label] = None
-                        self._mix_block_idx[label] = 0
-                        self._ensure_mix_iter(label)
-                        it = self._mix_iters.get(label)
-                        if it is None:
-                            break
                 texts, appended = self._read_from_mix_iter(label, mix_bytes)
                 if texts:
                     out_path = mix_path or self._path
@@ -224,7 +211,6 @@ class StreamingDataset:
                         for t in texts:
                             f.write(t)
                             f.write("\n\n")
-                    self._mix_block_idx[label] = self.block_idx + 1
                     print(f"  Appended {appended} bytes from {label} for block {self.block_idx}")
                 else:
                     print(f"  {label}: 0 bytes (vacío/agotado)")
@@ -261,6 +247,7 @@ class StreamingDataset:
         if self._prefetch_thread is not None and self._prefetch_thread.is_alive():
             print(f"  Prefetch previo aún activo; no se inicia otro")
             return
+        print(f"  Entrando hilo prefetch: bloque {block_idx}")
         self._prefetch_thread = threading.Thread(target=self._prefetch_worker, args=(block_idx,), daemon=True)
         self._prefetch_thread.start()
 
