@@ -28,7 +28,7 @@ class Config:
     kv_groups = 4
     layers = 16
     ffn_dim = 3072
-    block_size = 1024
+    block_size = 780
     emb_num = 32000
     rotary_pct = 0.25
 
