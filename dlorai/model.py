@@ -40,7 +40,7 @@ class Config:
     g1_headwise = True
 
     # MoE
-    num_experts = 8
+    num_experts = 4
     top_k = 2
     capacity = 1.25
     z_loss = 0.001
@@ -56,8 +56,8 @@ class Config:
     # capas pares comparten K (0-indexed impar: 1,3,5,...)
     share_k_even = True
 
-    batch_size: int = 6
-    grad_acc: int = 6
+    batch_size: int = 4
+    grad_acc: int = 8
     learning_rate: float = 3e-4
     weight_decay: float = 0.1
     betas: tuple = (0.9, 0.95)
