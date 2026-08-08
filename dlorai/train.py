@@ -9,7 +9,7 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
 from model import LLM, Config
-from dataset import download_wikipedia_50mb, StreamingDataset
+from dataset import download_tokenizer_corpus, StreamingDataset
 from huggingface import HFManager, PeriodicPusher
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 from plot import PlotManager
@@ -36,12 +36,12 @@ def generate_sample(model, tokenizer, device, prompt="hola", max_new=30):
 
 
 def train_tokenizer_from_wiki(vocab_size, output_path):
-    wiki = download_wikipedia_50mb()
+    corpus = download_tokenizer_corpus()
     tok = Tokenizer(models.BPE())
     tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tok.decoder = decoders.ByteLevel()
     trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["eos_token"])
-    with open(wiki, "r", encoding="utf-8") as f:
+    with open(corpus, "r", encoding="utf-8") as f:
         tok.train_from_iterator([f.read()], trainer=trainer)
     tok.save(output_path)
     return output_path

@@ -9,6 +9,9 @@ WIKI_CONFIG = ("wikimedia/wikipedia", "20231101.es")
 FINEWEB_CONFIG = ("epfml/FineWeb2-HQ", "spa_Latn")
 TWEETS_CONFIG = "pysentimiento/spanish-tweets"
 TOKENIZER_DATA_PATH = os.path.join(_DIR, "wiki_tokenizer_50mb.txt")
+TOKENIZER_FULL_PATH = os.path.join(_DIR, "tokenizer_70mb.txt")
+TOKENIZER_FINEWEB_PATH = os.path.join(_DIR, "fineweb_tokenizer_10mb.txt")
+TOKENIZER_TWEETS_PATH = os.path.join(_DIR, "tweets_tokenizer_10mb.txt")
 TRAIN_DATA_PATH = os.path.join(_DIR, "wiki_train_data.txt")
 
 # (dataset config, megabytes per block, label)
@@ -34,6 +37,42 @@ def download_wikipedia_50mb(output_path: str = TOKENIZER_DATA_PATH) -> str:
             f.write(text)
             written += tam
     print(f"Written {written} bytes to {output_path}")
+    return output_path
+
+
+def _download_dataset_for_tokenizer(ds_config, max_bytes, output_path, label):
+    if os.path.exists(output_path) and os.path.getsize(output_path) >= max_bytes:
+        print(f"{label} tokenizer data already at {output_path} ({os.path.getsize(output_path)} bytes)")
+        return output_path
+    print(f"Downloading {label} {max_bytes // 2**20}MB for tokenizer...")
+    if isinstance(ds_config, (tuple, list)):
+        ds = load_dataset(*ds_config, split="train", streaming=True)
+    else:
+        ds = load_dataset(ds_config, split="train", streaming=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        written = 0
+        for item in ds:
+            text = item.get("text") if isinstance(item, dict) else str(item)
+            tam = len(text.encode("utf-8"))
+            if written + tam > max_bytes:
+                break
+            f.write(text)
+            f.write("\n\n")
+            written += tam
+    print(f"Written {written} bytes to {output_path}")
+    return output_path
+
+
+def download_tokenizer_corpus(output_path: str = TOKENIZER_FULL_PATH) -> str:
+    """Corpus de 70MB para el tokenizer: Wiki ES 50MB + FineWeb2-HQ 10MB + Tweets 10MB."""
+    wiki = download_wikipedia_50mb()
+    fineweb = _download_dataset_for_tokenizer(FINEWEB_CONFIG, 10_000_000, TOKENIZER_FINEWEB_PATH, "FineWeb2-HQ")
+    tweets = _download_dataset_for_tokenizer(TWEETS_CONFIG, 10_000_000, TOKENIZER_TWEETS_PATH, "Spanish Tweets")
+    with open(output_path, "w", encoding="utf-8") as fout:
+        for p in (wiki, fineweb, tweets):
+            with open(p, "r", encoding="utf-8") as fin:
+                fout.write(fin.read())
+    print(f"Combined tokenizer corpus at {output_path} ({os.path.getsize(output_path)} bytes, ~70MB)")
     return output_path
 
 
