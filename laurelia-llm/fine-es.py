@@ -87,9 +87,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
+    hf = HFManager(repo_id=REPO, revision=REV)
+    hf._get_token()
+
     tok_path = os.path.join(_DIR, "tokenizer.json")
     if not os.path.exists(tok_path):
-        sys.exit("No tokenizer.json found")
+        print("tokenizer.json no está local; descargando desde HF...")
+        hf.download_tokenizer(tok_path)
     tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
     eos_id = tokenizer.tokenizer.token_to_id("eos_token")
     print(f"Vocab: {tokenizer.vocab_size}  eos_id: {eos_id}")
@@ -121,9 +125,6 @@ def main():
     prec = input("Precision (n=f32, b=bf16): ").strip().lower()
     dtype = torch.bfloat16 if prec == "b" else torch.float32
     print(f"  Compute: {dtype}")
-
-    hf = HFManager(repo_id=REPO, revision=REV)
-    hf._get_token()
 
     config = Config()
     config.emb_num = tokenizer.vocab_size
