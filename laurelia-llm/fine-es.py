@@ -176,12 +176,18 @@ def main():
     grad_acc = 8
     print(f"Ejemplos: {n_examples} | skip: {skip} | repeats: {repeats} | bs: {batch_size} | ga: {grad_acc}")
 
+    ex_per_step = batch_size * grad_acc
+    total_steps = (n_examples + ex_per_step - 1) // ex_per_step * repeats
+    if is_fine and res_step and res_step > total_steps:
+        print(f"  ATENCION: fine-checkpoint guarda step {res_step}, pero el maximo para este dataset/config es {total_steps}.")
+        print("  Es un checkpoint corrupto de una corrida previa (o datos distintos). Se reanuda desde 0 con sus pesos.")
+        res_step = 0
+
     samples = [build_sample(ex, tokenizer, eos_id, block_size) for ex in data[skip:skip + n_examples]]
     raw = data[skip:skip + n_examples]
     print(f"Muestras preparadas: {len(samples)}")
 
     model.train()
-    ex_per_step = batch_size * grad_acc
     res_step = res_step or 0
     consumed = res_step * ex_per_step
     start_pass = min(consumed // len(samples) + 1, repeats + 1)
