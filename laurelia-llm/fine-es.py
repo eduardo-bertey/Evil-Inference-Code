@@ -157,7 +157,7 @@ def main():
     repeats = int(sys.argv[sys.argv.index("--repeats") + 1]) if "--repeats" in sys.argv else 1
     step_cap = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 0
     batch_size = 10
-    grad_acc = 8
+    grad_acc = 4
     print(f"Ejemplos: {n_examples} | skip: {skip} | repeats: {repeats} | bs: {batch_size} | ga: {grad_acc}")
 
     samples = [build_sample(ex, tokenizer, eos_id, block_size) for ex in data[skip:skip + n_examples]]
