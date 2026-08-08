@@ -128,7 +128,7 @@ def main():
     config = Config()
     config.emb_num = tokenizer.vocab_size
     config.block_size = 512
-    lr = float(sys.argv[sys.argv.index("--lr") + 1]) if "--lr" in sys.argv else 3e-5
+    lr = float(sys.argv[sys.argv.index("--lr") + 1]) if "--lr" in sys.argv else 1e-4
     model = LLM(config).to(device).to(dtype)
     optimizer = model.configure_optimizers(0.1, lr, (0.9, 0.95), "cuda")
 
