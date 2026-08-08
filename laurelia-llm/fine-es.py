@@ -133,16 +133,28 @@ def main():
     optimizer = model.configure_optimizers(0.1, lr, (0.9, 0.95), "cuda")
 
     ckpt_path = os.path.join(_DIR, "checkpoint.pt")
-    if os.path.exists(ckpt_path):
-        print(f"checkpoint.pt existe; no se descarga nada -> {ckpt_path}")
+    if os.path.exists(fine_path):
+        print(f"fine-checkpoint.pt local encontrado; se continúa desde {fine_path}")
+        ckpt_source = fine_path
     else:
-        print("checkpoint.pt no existe; descargando base desde HF...")
-        if not hf.download_checkpoint(ckpt_path):
-            sys.exit("No se pudo descargar checkpoint.pt")
-    ckpt = torch.load(ckpt_path, map_location="cpu")
+        print("fine-checkpoint.pt no está local; buscando en HF...")
+        if hf.download_checkpoint(fine_path, filename="fine-checkpoint.pt"):
+            print(f"fine-checkpoint.pt descargado de {REPO}@{REV}")
+            ckpt_source = fine_path
+        else:
+            print("fine-checkpoint.pt no está en HF; usando base checkpoint.pt")
+            if os.path.exists(ckpt_path):
+                print(f"checkpoint.pt existe; no se descarga nada -> {ckpt_path}")
+            else:
+                print("checkpoint.pt no existe; descargando base desde HF...")
+                if not hf.download_checkpoint(ckpt_path):
+                    sys.exit("No se pudo descargar checkpoint.pt")
+            ckpt_source = ckpt_path
+    ckpt = torch.load(ckpt_source, map_location="cpu")
     ckpt["model"].pop("head.emb_weight", None)
     model.load_state_dict(ckpt["model"], strict=False)
-    print(f"Base cargada desde {ckpt_path}")
+    res_step = ckpt.get("step", None)
+    print(f"Cargado desde {ckpt_source}" + (f" (fine-tune previo, step {res_step})" if res_step else ""))
 
     block_size = config.block_size
     data_path = os.path.join(_DIR, DATA_FILE)
@@ -204,6 +216,16 @@ def main():
                 q = r.get("instruction", "")
                 gen = generate_sample(model, tokenizer, device, prompt=chat_prompt(q, ""), max_new=40, eos_id=eos_id)
                 print(f"  [{step}] GEN: {gen!r}")
+                if step % 200 == 0:
+                    state = model.state_dict()
+                    state.pop("head.emb_weight", None)
+                    torch.save({"step": step, "model": state}, fine_path)
+                    print(f"  Autosave step {step} -> {fine_path}")
+                    print(f"  Subiendo fine-checkpoint.pt a {REPO}@{REV} ...")
+                    try:
+                        hf.upload_checkpoint(fine_path, tokenizer_path=tok_path, step=step)
+                    except Exception as e:
+                        print(f"  ERROR subiendo fine-checkpoint a {REPO}@{REV}: {e}")
                 if step_cap and step >= step_cap:
                     stop = True
                     break
