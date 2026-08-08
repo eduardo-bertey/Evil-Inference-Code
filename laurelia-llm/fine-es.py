@@ -134,14 +134,17 @@ def main():
     optimizer = model.configure_optimizers(0.1, lr, (0.9, 0.95), "cuda")
 
     ckpt_path = os.path.join(_DIR, "checkpoint.pt")
+    is_fine = False
     if os.path.exists(fine_path):
         print(f"fine-checkpoint.pt local encontrado; se continúa desde {fine_path}")
         ckpt_source = fine_path
+        is_fine = True
     else:
         print("fine-checkpoint.pt no está local; buscando en HF...")
         if hf.download_checkpoint(fine_path, filename="fine-checkpoint.pt"):
             print(f"fine-checkpoint.pt descargado de {REPO}@{REV}")
             ckpt_source = fine_path
+            is_fine = True
         else:
             print("fine-checkpoint.pt no está en HF; usando base checkpoint.pt")
             if os.path.exists(ckpt_path):
@@ -154,7 +157,7 @@ def main():
     ckpt = torch.load(ckpt_source, map_location="cpu")
     ckpt["model"].pop("head.emb_weight", None)
     model.load_state_dict(ckpt["model"], strict=False)
-    res_step = ckpt.get("step", None)
+    res_step = ckpt.get("step", None) if is_fine else None
     print(f"Cargado desde {ckpt_source}" + (f" (fine-tune previo, step {res_step})" if res_step else ""))
 
     block_size = config.block_size
