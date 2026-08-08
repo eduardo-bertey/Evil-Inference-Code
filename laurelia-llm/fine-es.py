@@ -154,7 +154,7 @@ def main():
         data = json.load(f)
     n_examples = int(sys.argv[sys.argv.index("--examples") + 1]) if "--examples" in sys.argv else len(data)
     skip = int(sys.argv[sys.argv.index("--skip") + 1]) if "--skip" in sys.argv else 0
-    repeats = int(sys.argv[sys.argv.index("--repeats") + 1]) if "--repeats" in sys.argv else 3
+    repeats = int(sys.argv[sys.argv.index("--repeats") + 1]) if "--repeats" in sys.argv else 1
     step_cap = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 0
     batch_size = 10
     grad_acc = 8
