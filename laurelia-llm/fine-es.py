@@ -171,15 +171,15 @@ def main():
     n_examples = int(sys.argv[sys.argv.index("--examples") + 1]) if "--examples" in sys.argv else len(data)
     skip = int(sys.argv[sys.argv.index("--skip") + 1]) if "--skip" in sys.argv else 0
     repeats = int(sys.argv[sys.argv.index("--repeats") + 1]) if "--repeats" in sys.argv else 1
-    step_cap = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 0
-    batch_size = 16
+    step_cap = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 800
+    batch_size = 12
     grad_acc = 8
-    print(f"Ejemplos: {n_examples} | skip: {skip} | repeats: {repeats} | bs: {batch_size} | ga: {grad_acc}")
+    print(f"Ejemplos: {n_examples} | skip: {skip} | repeats: {repeats} | bs: {batch_size} | ga: {grad_acc} | cap: {step_cap}")
 
     ex_per_step = batch_size * grad_acc
     total_steps = (n_examples + ex_per_step - 1) // ex_per_step * repeats
     if is_fine and res_step and res_step > total_steps:
-        print(f"  ATENCION: fine-checkpoint guarda step {res_step}, pero el maximo para este dataset/config es {total_steps}.")
+        print(f"  ATENCION: fine-checkpoint guarda step {res_step}, pero el maximo para este dataset/config es {total_steps} (cap {step_cap}).")
         print("  Es un checkpoint corrupto de una corrida previa (o datos distintos). Se reanuda desde 0 con sus pesos.")
         res_step = 0
 
