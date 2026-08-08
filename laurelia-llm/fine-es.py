@@ -156,7 +156,7 @@ def main():
     skip = int(sys.argv[sys.argv.index("--skip") + 1]) if "--skip" in sys.argv else 0
     repeats = int(sys.argv[sys.argv.index("--repeats") + 1]) if "--repeats" in sys.argv else 1
     step_cap = int(sys.argv[sys.argv.index("--steps") + 1]) if "--steps" in sys.argv else 0
-    batch_size = 8
+    batch_size = 10
     grad_acc = 8
     print(f"Ejemplos: {n_examples} | skip: {skip} | repeats: {repeats} | bs: {batch_size} | ga: {grad_acc}")
 
