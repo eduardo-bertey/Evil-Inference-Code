@@ -28,7 +28,7 @@ class Config:
     kv_groups = 4
     layers = 16
     ffn_dim = 3072
-    block_size = 780
+    block_size = 1024
     emb_num = 32000
     rotary_pct = 0.25
 
@@ -59,8 +59,8 @@ class Config:
     # capas pares comparten K (0-indexed impar: 1,3,5,...)
     share_k_even = True
 
-    batch_size: int = 4
-    grad_acc: int = 8
+    batch_size: int = 6
+    grad_acc: int = 6
     learning_rate: float = 3e-4
     weight_decay: float = 0.1
     betas: tuple = (0.9, 0.95)
