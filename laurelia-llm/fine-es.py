@@ -177,17 +177,23 @@ def main():
     print(f"Muestras preparadas: {len(samples)}")
 
     model.train()
-    step = 0
+    ex_per_step = batch_size * grad_acc
+    res_step = res_step or 0
+    consumed = res_step * ex_per_step
+    start_pass = min(consumed // len(samples) + 1, repeats + 1)
+    start_off = consumed % len(samples)
+    step = res_step
+    if res_step:
+        print(f"Reanudando dataset: paso {consumed} ejemplos (step {step}), pass {start_pass}")
     stop = False
     asked = False
     ask_step = 30
     t0 = time.time()
     order = list(range(len(samples)))
-    random.Random(1).shuffle(order)
-    for pass_i in range(1, repeats + 1):
+    for pass_i in range(start_pass, repeats + 1):
         random.Random(pass_i).shuffle(order)
         mb_count = 0
-        for idx in range(0, len(order), batch_size):
+        for idx in range(start_off, len(order), batch_size):
             mb = order[idx:idx + batch_size]
             xs, ys = [], []
             max_len = max(len(samples[i][0]) for i in mb)
