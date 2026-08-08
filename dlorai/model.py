@@ -148,18 +148,20 @@ class MoELayer(nn.Module):
         self.load_balance_gamma = config.load_balance_gamma
         self.bias_decay = config.bias_decay
         self.noise_std = config.moe_noise
-
-        self.router = nn.Linear(config.dim, self.n_experts, bias=False)
-        self.register_buffer("expert_bias", torch.zeros(self.n_experts))
-        self.experts = nn.ModuleList([
-            DoraExpert(config.dim, config.ffn_dim, config.lora_rank, config.lora_alpha)
-            for _ in range(self.n_experts)
-        ])
-        self.base = ExpertSwiGLU(config.dim, config.ffn_dim)
         self.enabled = getattr(config, 'moe_enabled', False)
+
+        if self.enabled:
+            self.router = nn.Linear(config.dim, self.n_experts, bias=False)
+            self.register_buffer("expert_bias", torch.zeros(self.n_experts))
+            self.experts = nn.ModuleList([
+                DoraExpert(config.dim, config.ffn_dim, config.lora_rank, config.lora_alpha)
+                for _ in range(self.n_experts)
+            ])
+        self.base = ExpertSwiGLU(config.dim, config.ffn_dim)
 
         self.register_buffer("last_counts", torch.zeros(self.n_experts, dtype=torch.long))
         self.last_total = 0
+        self.router = getattr(self, "router", None)
 
     def _router_z_loss(self, logits):
         if self.z_loss_gamma <= 0:
