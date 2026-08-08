@@ -49,6 +49,9 @@ class Config:
     load_balance_gamma = 0.0
     bias_decay = 0.1
 
+    # dLoRA (MoE adapters) desactivado por defecto: solo corre el base denso
+    moe_enabled = False
+
     # dLoRA (DoRA)
     lora_rank = 64
     lora_alpha = 64
@@ -153,6 +156,7 @@ class MoELayer(nn.Module):
             for _ in range(self.n_experts)
         ])
         self.base = ExpertSwiGLU(config.dim, config.ffn_dim)
+        self.enabled = getattr(config, 'moe_enabled', False)
 
         self.register_buffer("last_counts", torch.zeros(self.n_experts, dtype=torch.long))
         self.last_total = 0
@@ -173,6 +177,9 @@ class MoELayer(nn.Module):
         B, T, C = x.shape
         N = B * T
         xf = x.reshape(N, C)
+
+        if not self.enabled:
+            return self.base(xf).reshape(B, T, C), torch.tensor(0.0, device=x.device)
 
         scores = self.router(xf)
         if self.training and self.noise_std > 0:
