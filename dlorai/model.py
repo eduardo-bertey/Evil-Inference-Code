@@ -36,8 +36,8 @@ class Config:
     sm_eps = 1e-6
     sm_zones = [(0.9, 0.9, 0.3), (1.0, 1.1, 0.6), (1.2, 1.3, 1.0)]  # shallow/mid/deep
 
-    # G1 headwise gate
-    g1_headwise = True
+    # G1 headwise gate (desactivado por defecto)
+    g1_headwise = False
 
     # MoE
     num_experts = 4
@@ -249,6 +249,7 @@ class Attention(nn.Module):
 
         self.gate = nn.Linear(self.head_dim, 1, bias=False)
         self.gate.is_gate_proj = True
+        self.g1_enabled = getattr(config, 'g1_headwise', False)
 
         self.sm_eps = getattr(config, 'sm_eps', 1e-6)
         alpha, beta, gamma = _sm_zone_params(layer_idx, getattr(config, 'sm_zones',
@@ -281,8 +282,9 @@ class Attention(nn.Module):
 
     def _post(self, z):
         z = z.transpose(1, 2).contiguous()
-        g = torch.sigmoid(self.gate(z))
-        z = z * g
+        if self.g1_enabled:
+            g = torch.sigmoid(self.gate(z))
+            z = z * g
         return z.view(z.shape[0], z.shape[1], -1)
 
     def forward(self, x, k_shared=None):
