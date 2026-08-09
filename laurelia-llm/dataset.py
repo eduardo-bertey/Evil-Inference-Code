@@ -9,6 +9,9 @@ WIKI_CONFIG = ("wikimedia/wikipedia", "20231101.es")
 FINEWEB_CONFIG = ("epfml/FineWeb2-HQ", "spa_Latn")
 TWEETS_CONFIG = "pysentimiento/spanish-tweets"
 TOKENIZER_DATA_PATH = os.path.join(_DIR, "wiki_tokenizer_50mb.txt")
+TOKENIZER_FULL_PATH = os.path.join(_DIR, "tokenizer_70mb.txt")
+TOKENIZER_FINEWEB_PATH = os.path.join(_DIR, "fineweb_tokenizer_10mb.txt")
+TOKENIZER_TWEETS_PATH = os.path.join(_DIR, "tweets_tokenizer_10mb.txt")
 TRAIN_DATA_PATH = os.path.join(_DIR, "wiki_train_data.txt")
 
 # (dataset config, megabytes per block, label)
@@ -34,6 +37,42 @@ def download_wikipedia_50mb(output_path: str = TOKENIZER_DATA_PATH) -> str:
             f.write(text)
             written += tam
     print(f"Written {written} bytes to {output_path}")
+    return output_path
+
+
+def _download_dataset_for_tokenizer(ds_config, max_bytes, output_path, label):
+    if os.path.exists(output_path) and os.path.getsize(output_path) >= max_bytes:
+        print(f"{label} tokenizer data already at {output_path} ({os.path.getsize(output_path)} bytes)")
+        return output_path
+    print(f"Downloading {label} {max_bytes // 2**20}MB for tokenizer...")
+    if isinstance(ds_config, (tuple, list)):
+        ds = load_dataset(*ds_config, split="train", streaming=True)
+    else:
+        ds = load_dataset(ds_config, split="train", streaming=True)
+    with open(output_path, "w", encoding="utf-8") as f:
+        written = 0
+        for item in ds:
+            text = item.get("text") if isinstance(item, dict) else str(item)
+            tam = len(text.encode("utf-8"))
+            if written + tam > max_bytes:
+                break
+            f.write(text)
+            f.write("\n\n")
+            written += tam
+    print(f"Written {written} bytes to {output_path}")
+    return output_path
+
+
+def download_tokenizer_corpus(output_path: str = TOKENIZER_FULL_PATH) -> str:
+    """Corpus de 70MB para el tokenizer: Wiki ES 50MB + FineWeb2-HQ 10MB + Tweets 10MB."""
+    wiki = download_wikipedia_50mb()
+    fineweb = _download_dataset_for_tokenizer(FINEWEB_CONFIG, 10_000_000, TOKENIZER_FINEWEB_PATH, "FineWeb2-HQ")
+    tweets = _download_dataset_for_tokenizer(TWEETS_CONFIG, 10_000_000, TOKENIZER_TWEETS_PATH, "Spanish Tweets")
+    with open(output_path, "w", encoding="utf-8") as fout:
+        for p in (wiki, fineweb, tweets):
+            with open(p, "r", encoding="utf-8") as fin:
+                fout.write(fin.read())
+    print(f"Combined tokenizer corpus at {output_path} ({os.path.getsize(output_path)} bytes, ~70MB)")
     return output_path
 
 
@@ -69,9 +108,9 @@ class StreamingDataset:
             else:
                 mixes = [(self.mix_dataset, self.mix_mb, "mix")]
         self.mixes = mixes
-        # label -> (iter, block_idx)
+        # label -> (iter, offset absoluto en bytes ya consumido)
         self._mix_iters: dict[str, Optional[object]] = {}
-        self._mix_block_idx: dict[str, int] = {}
+        self._mix_byte_pos: dict[str, int] = {}
         # Persistent streaming iterator for main block (created once, lives forever)
         self._wiki_iter = None
         self._wiki_block_idx = 0
@@ -102,23 +141,55 @@ class StreamingDataset:
         self._mix_iters[label] = iter(ds)
 
     def _read_from_mix_iter(self, label: str, max_bytes: int):
+        """Lee la ventana de bytes ABSOLUTA [block_idx*max_bytes, (block_idx+1)*max_bytes).
+
+        Sin esto, reiniciar y pedir el bloque 500 directo devolvía el PRIMER mb del
+        stream (el mix no hacía skip, a diferencia de wiki). Con el seek por offset
+        absoluto, pedir el 500 siempre da el mismo contenido, directo o secuencial.
+        Avanza solo hacia adelante (eficiente en corrida), y desde un stream fresco
+        al reiniciar (reproducible entre entornos).
+        """
         self._ensure_mix_iter(label)
         it = self._mix_iters.get(label)
         if it is None:
+            return [], 0
+        skip = self.block_idx * max_bytes
+        pos = self._mix_byte_pos.get(label, 0)
+        if pos > skip:
+            self._mix_iters[label] = None
+            self._mix_byte_pos[label] = 0
+            return [], 0
+        consumed = pos
+        exhausted = False
+        if consumed < skip:
+            print(f"  {label} seek {pos // 2**20}MB -> {skip // 2**20}MB ({skip} bytes)...")
+            for item in it:
+                text = item.get("text") if isinstance(item, dict) else str(item)
+                tam = len(text.encode("utf-8"))
+                consumed += tam
+                if consumed >= skip:
+                    break
+            else:
+                exhausted = True
+            if not exhausted:
+                print(f"  {label} seek listo en {consumed // 2**20}MB")
+        if exhausted:
+            self._mix_iters[label] = None
+            self._mix_byte_pos[label] = 0
             return [], 0
         texts = []
         appended = 0
         for item in it:
             text = item.get("text") if isinstance(item, dict) else str(item)
             tam = len(text.encode("utf-8"))
+            if tam == 0:
+                continue
             if appended + tam > max_bytes:
                 break
             texts.append(text)
             appended += tam
-        if appended == 0:
-            print(f"  {label} stream vacío, se recicla para el próximo bloque")
-            self._mix_iters[label] = None
-            self._mix_block_idx[label] = 0
+        self._mix_iters[label] = it
+        self._mix_byte_pos[label] = consumed + appended
         return texts, appended
 
     def _new_wiki_iter(self):
