@@ -9,7 +9,9 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
 from model import LLM, Config
-from wikipedia import WikiDataset, download_wikipedia_50mb
+import importlib
+train_data = importlib.import_module("train-data")
+from wikipedia import download_wikipedia_50mb
 from huggingface import HFManager, PeriodicPusher
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 from plot import PlotManager
@@ -156,7 +158,7 @@ def main():
     else:
         bi = input(f"Block [{ckpt_block}]: ").strip()
         block_idx = int(bi) if bi else ckpt_block
-        sd = WikiDataset(block_mb=3.0, block_idx=block_idx)
+        sd = train_data.TrainData(block_idx=block_idx)
         sd.load_tokens(tokenizer)
         tokens = sd.get_tokens()
         n = len(tokens)
