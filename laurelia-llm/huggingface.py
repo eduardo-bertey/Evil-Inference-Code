@@ -6,7 +6,7 @@ import time
 import getpass
 from pathlib import Path
 
-from huggingface_hub import HfApi, create_repo, hf_hub_download
+from huggingface_hub import HfApi, create_repo, hf_hub_download, login as hf_login
 from huggingface_hub.errors import RepositoryNotFoundError, EntryNotFoundError
 
 
@@ -34,6 +34,14 @@ class HFManager:
         if self._api is None:
             self._api = HfApi(token=self._get_token())
         return self._api
+
+    def login_global(self):
+        """Aplica el token globalmente para que load_dataset descargue autenticado (más rápido)."""
+        try:
+            hf_login(token=self._get_token(), add_to_git_credential=False)
+            print("HF token aplicado globalmente para descargas")
+        except Exception as e:
+            print(f"  No se pudo aplicar el token global: {e}")
 
     def ensure_repo(self):
         api = self._get_api()
