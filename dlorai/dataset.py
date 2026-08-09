@@ -162,6 +162,7 @@ class StreamingDataset:
         consumed = pos
         exhausted = False
         if consumed < skip:
+            print(f"  {label} seek {pos // 2**20}MB -> {skip // 2**20}MB ({skip} bytes)...")
             for item in it:
                 text = item.get("text") if isinstance(item, dict) else str(item)
                 tam = len(text.encode("utf-8"))
@@ -170,6 +171,8 @@ class StreamingDataset:
                     break
             else:
                 exhausted = True
+            if not exhausted:
+                print(f"  {label} seek listo en {consumed // 2**20}MB")
         if exhausted:
             self._mix_iters[label] = None
             self._mix_byte_pos[label] = 0
