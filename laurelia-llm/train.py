@@ -9,7 +9,8 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
 from model import LLM, Config
-from dataset import download_wikipedia_50mb, StreamingDataset
+from dataset import StreamingDataset
+from wikipedia import download_wikipedia_50mb
 from huggingface import HFManager, PeriodicPusher
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 from plot import PlotManager
