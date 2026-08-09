@@ -317,9 +317,6 @@ class StreamingDataset:
 
     def next_block(self):
         self._wait_prefetch()
-        old_path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
-        if os.path.exists(old_path):
-            os.remove(old_path)
         self._tokens = None
         self.block_idx += 1
         self._path = os.path.join(_DIR, f"wiki_block_{self.block_idx}.txt")
