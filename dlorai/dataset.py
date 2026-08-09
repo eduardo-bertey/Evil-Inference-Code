@@ -108,9 +108,9 @@ class StreamingDataset:
             else:
                 mixes = [(self.mix_dataset, self.mix_mb, "mix")]
         self.mixes = mixes
-        # label -> (iter, block_idx)
+        # label -> (iter, offset absoluto en bytes ya consumido)
         self._mix_iters: dict[str, Optional[object]] = {}
-        self._mix_block_idx: dict[str, int] = {}
+        self._mix_byte_pos: dict[str, int] = {}
         # Persistent streaming iterator for main block (created once, lives forever)
         self._wiki_iter = None
         self._wiki_block_idx = 0
@@ -141,23 +141,52 @@ class StreamingDataset:
         self._mix_iters[label] = iter(ds)
 
     def _read_from_mix_iter(self, label: str, max_bytes: int):
+        """Lee la ventana de bytes ABSOLUTA [block_idx*max_bytes, (block_idx+1)*max_bytes).
+
+        Sin esto, reiniciar y pedir el bloque 500 directo devolvía el PRIMER mb del
+        stream (el mix no hacía skip, a diferencia de wiki). Con el seek por offset
+        absoluto, pedir el 500 siempre da el mismo contenido, directo o secuencial.
+        Avanza solo hacia adelante (eficiente en corrida), y desde un stream fresco
+        al reiniciar (reproducible entre entornos).
+        """
         self._ensure_mix_iter(label)
         it = self._mix_iters.get(label)
         if it is None:
+            return [], 0
+        skip = self.block_idx * max_bytes
+        pos = self._mix_byte_pos.get(label, 0)
+        if pos > skip:
+            self._mix_iters[label] = None
+            self._mix_byte_pos[label] = 0
+            return [], 0
+        consumed = pos
+        exhausted = False
+        if consumed < skip:
+            for item in it:
+                text = item.get("text") if isinstance(item, dict) else str(item)
+                tam = len(text.encode("utf-8"))
+                consumed += tam
+                if consumed >= skip:
+                    break
+            else:
+                exhausted = True
+        if exhausted:
+            self._mix_iters[label] = None
+            self._mix_byte_pos[label] = 0
             return [], 0
         texts = []
         appended = 0
         for item in it:
             text = item.get("text") if isinstance(item, dict) else str(item)
             tam = len(text.encode("utf-8"))
+            if tam == 0:
+                continue
             if appended + tam > max_bytes:
                 break
             texts.append(text)
             appended += tam
-        if appended == 0:
-            print(f"  {label} stream vacío, se recicla para el próximo bloque")
-            self._mix_iters[label] = None
-            self._mix_block_idx[label] = 0
+        self._mix_iters[label] = it
+        self._mix_byte_pos[label] = consumed + appended
         return texts, appended
 
     def _new_wiki_iter(self):
