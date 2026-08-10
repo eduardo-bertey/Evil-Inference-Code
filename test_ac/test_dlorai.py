@@ -130,8 +130,8 @@ def main():
             loss_val = loss.item()
             del logits, loss
 
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-            lr_curr = scheduler.get_last_lr()[0]
+            grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
+            lr_curr = float(scheduler.get_last_lr()[0])
             optimizer.step()
             scheduler.step()
             optimizer.zero_grad()
