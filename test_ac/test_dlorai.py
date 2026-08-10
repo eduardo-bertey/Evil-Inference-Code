@@ -44,6 +44,15 @@ def main():
     print(f"Config: dim={config.dim} lay={config.layers} heads={config.heads} kv={config.kv_groups} "
           f"seq={config.block_size} bs={config.batch_size} lr={config.learning_rate}")
 
+    import getpass
+    from huggingface_hub import login as hf_login
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    if not token:
+        token = getpass.getpass("HF token (write a ScortexIA/laurelia): ").strip()
+    os.environ["HF_TOKEN"] = token
+    hf_login(token=token)
+    print("HF token aplicado globalmente")
+
     tok_path = os.path.join(_DIR, "tokenizer_test_16k.json")
     wiki = os.path.join(_DIR, "wiki_tokenizer_50mb.txt")
     download_wikipedia_50mb(wiki)
@@ -162,11 +171,7 @@ def main():
 
     print("Subiendo a ScortexIA/laurelia@doc-llm...")
     from huggingface_hub import HfApi
-    import getpass
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-    if not token:
-        token = getpass.getpass("HF token (con write a ScortexIA/laurelia): ").strip()
-    api = HfApi(token=token)
+    api = HfApi(token=os.environ["HF_TOKEN"])
     for f in [hist_path, plot_path]:
         api.upload_file(
             path_or_fileobj=f,
