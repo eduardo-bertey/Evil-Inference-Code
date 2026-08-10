@@ -45,7 +45,8 @@ def main():
           f"seq={config.block_size} bs={config.batch_size} lr={config.learning_rate}")
 
     tok_path = os.path.join(_DIR, "tokenizer_test_16k.json")
-    wiki = download_wikipedia_50mb()
+    wiki = os.path.join(_DIR, "wiki_tokenizer_50mb.txt")
+    download_wikipedia_50mb(wiki)
 
     def iter_chunks(path, mb=5):
         with open(path, "rb") as fh:
