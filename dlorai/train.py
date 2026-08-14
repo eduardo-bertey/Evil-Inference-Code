@@ -9,7 +9,10 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
 from model import LLM, Config
-from dataset import download_tokenizer_corpus, StreamingDataset
+import importlib
+from dataset import download_tokenizer_corpus
+sys.path.insert(0, os.path.join(_DIR, "..", "laurelia-llm"))
+train_data = importlib.import_module("train-data")
 from huggingface import HFManager, PeriodicPusher
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 from plot import PlotManager
@@ -156,7 +159,7 @@ def main():
     else:
         bi = input(f"Block [{ckpt_block}]: ").strip()
         block_idx = int(bi) if bi else ckpt_block
-        sd = StreamingDataset(block_mb=3.0, block_idx=block_idx, mezcla=True)
+        sd = train_data.TrainData(block_idx=block_idx)
         sd.load_tokens(tokenizer)
         tokens = sd.get_tokens()
         n = len(tokens)
