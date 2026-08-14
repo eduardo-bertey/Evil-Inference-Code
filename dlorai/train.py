@@ -11,7 +11,6 @@ sys.path.insert(0, os.path.join(_DIR, ".."))
 from model import LLM, Config
 import importlib
 from dataset import download_tokenizer_corpus
-sys.path.insert(0, os.path.join(_DIR, "..", "laurelia-llm"))
 train_data = importlib.import_module("train-data")
 from huggingface import HFManager, PeriodicPusher
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
