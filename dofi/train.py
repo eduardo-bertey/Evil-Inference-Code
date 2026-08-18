@@ -133,6 +133,12 @@ def main():
     print(f"Vocab: {tokenizer.vocab_size}")
 
     model = DofiLLM(config).to(device).to(dtype=dtype)
+
+    # Congelar todos los bloques al inicio (se desbloquean por paso)
+    for block in model.blocks:
+        for p in block.parameters():
+            p.requires_grad = False
+
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
@@ -222,6 +228,13 @@ def main():
 
             # 1. Eleg bloque al azar
             dblock_idx = random.randint(0, config.num_blocks - 1)
+
+            # Congelar todos, activar solo el bloque activo
+            active_layers = model.get_block_layers(dblock_idx)
+            for i, block in enumerate(model.blocks):
+                requires_grad = i in active_layers
+                for p in block.parameters():
+                    p.requires_grad = requires_grad
 
             # 2. Muestrear σ del rango del bloque
             sigma_np = sample_sigma_in_block(dblock_idx, block_sigmas, gamma=config.gamma)

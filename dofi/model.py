@@ -295,8 +295,9 @@ class DofiLLM(nn.Module):
     def forward_block(self, block_idx, input_ids, sigma):
         """Forward solo por un bloque de capas (para training).
 
-        Agrega ruido Gaussian σ a los embeddings del target.
-        El modelo predice el target limpio desde el input ruidoso.
+        Congela todos los bloques excepto el activo.
+        Agrega ruido Gaussian σ a los embeddings.
+        Gradient checkpointing en el bloque activo para ahorrar VRAM.
         """
         sigma_cond = self.timestep_embedder(sigma)
 
@@ -308,10 +309,14 @@ class DofiLLM(nn.Module):
             noise = torch.randn_like(x)
             x = x + noise * sigma_val
 
+        # Congelar todos excepto embeddings, timestep, y bloque activo
         layer_indices = self.get_block_layers(block_idx)
         k_prev = None
         for i in layer_indices:
-            x, kv = self.blocks[i](x, sigma_cond, k_shared=k_prev)
+            x, kv = torch.utils.checkpoint.checkpoint(
+                self.blocks[i], x, sigma_cond, k_prev,
+                use_reentrant=False,
+            )
             k_prev = kv
 
         x = self.norm_f(x)
