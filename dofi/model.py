@@ -286,7 +286,6 @@ class DofiLLM(nn.Module):
             nn.init.zeros_(block.adaLN_attn.net[-1].bias)
             nn.init.zeros_(block.adaLN_ffn.net[-1].weight)
             nn.init.zeros_(block.adaLN_ffn.net[-1].bias)
-        nn.init.zeros_(self.lm_head.weight)
 
     def get_block_layers(self, block_idx):
         """Retorna los índices de capas para un bloque dado."""
@@ -294,10 +293,20 @@ class DofiLLM(nn.Module):
         return list(range(start, start + self.config.layers_per_block))
 
     def forward_block(self, block_idx, input_ids, sigma):
-        """Forward solo por un bloque de capas (para training)."""
+        """Forward solo por un bloque de capas (para training).
+
+        Agrega ruido Gaussian σ a los embeddings del target.
+        El modelo predice el target limpio desde el input ruidoso.
+        """
         sigma_cond = self.timestep_embedder(sigma)
 
         x = self.embeddings(input_ids)
+
+        # Agregar ruido según σ (diffusion forward process)
+        sigma_val = sigma if isinstance(sigma, float) else sigma.item()
+        if sigma_val > 0:
+            noise = torch.randn_like(x)
+            x = x + noise * sigma_val
 
         layer_indices = self.get_block_layers(block_idx)
         k_prev = None
