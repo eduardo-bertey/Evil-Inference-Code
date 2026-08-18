@@ -15,6 +15,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from rope import RoPE
+from dblock_modules import get_discrete_sigmas
 
 
 class Config:
@@ -81,6 +82,10 @@ class TimestepEmbedder(nn.Module):
         )
 
     def forward(self, sigma):
+        if not isinstance(sigma, torch.Tensor):
+            sigma = torch.tensor(sigma, dtype=torch.float32)
+        if sigma.dim() == 0:
+            sigma = sigma.unsqueeze(0)
         t_emb = sinusoidal_embedding(sigma, self.mlp[0].in_features)
         return self.mlp(t_emb)
 
@@ -342,22 +347,71 @@ class DofiLLM(nn.Module):
         return logits, new_caches
 
     @torch.no_grad()
-    def generate(self, input_ids, max_new_tokens=100, temperature=0.8, top_k=40, sigma=0.002):
-        """Generación con KV cache."""
+    def ode_solve(self, x, num_steps=20, sigma_min=0.002, sigma_max=80.0):
+        """ODE solver: denoise x pasando por todos los bloques con σ decreciente.
+
+        Cada paso = 1 Euler step de la reverse diffusion ODE:
+            dx/dσ = (x - predict(x, σ)) / σ
+        """
+        sigmas = get_discrete_sigmas(num_steps, sigma_min, sigma_max, dblock=True)
+        sigma_cond = self.timestep_embedder(sigmas[0])
+        x = self.norm_f(x)
+
+        for i in range(len(sigmas) - 1):
+            sigma_cur = sigmas[i]
+            sigma_next = sigmas[i + 1]
+
+            # Forward por todos los bloques con σ actual
+            h = x
+            sc = self.timestep_embedder(sigma_cur)
+            for block in self.blocks:
+                h = block(h, sc)
+
+            # Euler step
+            x = x + (sigma_next - sigma_cur) * (h - x) / sigma_cur
+
+        # Logits finales en σ_min
+        sc_min = self.timestep_embedder(sigmas[-1])
+        h = x
+        for block in self.blocks:
+            h = block(h, sc_min)
+        logits = self.lm_head(h)
+        return logits
+
+    @torch.no_grad()
+    def generate(self, input_ids, max_new_tokens=100, temperature=0.8, top_k=40,
+                 sigma=0.002, use_ode=False, ode_steps=20):
+        """Generación con KV cache.
+
+        use_ode=True: ODE solver con σ decreciente (más lento, mejor calidad).
+        use_ode=False: σ fijo (rápido, como Transformer normal).
+        """
         device = input_ids.device
-        offset = 0
-        caches = None
 
-        for _ in range(max_new_tokens):
-            logits, caches = self.forward_with_cache(input_ids[:, -1:], offset, caches, sigma)
-            offset += input_ids.shape[1]
-
-            next_logits = logits[:, -1, :] / temperature
-            if top_k > 0:
-                v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
-                next_logits[next_logits < v[:, [-1]]] = float('-inf')
-            probs = F.softmax(next_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            input_ids = torch.cat([input_ids, next_token], dim=1)
+        if use_ode:
+            for _ in range(max_new_tokens):
+                ctx = input_ids
+                ctx_exp = ctx.unsqueeze(0) if ctx.dim() == 1 else ctx
+                logits = self.ode_solve(ctx_exp, num_steps=ode_steps)
+                next_logits = logits[:, -1, :] / temperature
+                if top_k > 0:
+                    v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
+                    next_logits[next_logits < v[:, [-1]]] = float('-inf')
+                probs = F.softmax(next_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+                input_ids = torch.cat([input_ids, next_token], dim=1)
+        else:
+            offset = 0
+            caches = None
+            for _ in range(max_new_tokens):
+                logits, caches = self.forward_with_cache(input_ids[:, -1:], offset, caches, sigma)
+                offset += input_ids.shape[1]
+                next_logits = logits[:, -1, :] / temperature
+                if top_k > 0:
+                    v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
+                    next_logits[next_logits < v[:, [-1]]] = float('-inf')
+                probs = F.softmax(next_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+                input_ids = torch.cat([input_ids, next_token], dim=1)
 
         return input_ids
