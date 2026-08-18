@@ -313,10 +313,7 @@ class DofiLLM(nn.Module):
         layer_indices = self.get_block_layers(block_idx)
         k_prev = None
         for i in layer_indices:
-            x, kv = torch.utils.checkpoint.checkpoint(
-                self.blocks[i], x, sigma_cond, k_prev,
-                use_reentrant=False,
-            )
+            x, kv = self.blocks[i](x, sigma_cond, k_shared=k_prev)
             k_prev = kv
 
         x = self.norm_f(x)
