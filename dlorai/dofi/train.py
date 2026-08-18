@@ -19,22 +19,21 @@ sys.path.insert(0, os.path.join(_DIR, ".."))
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 from model import DofiLLM, Config
+from huggingface import HFManager, PeriodicPusher
+from plot import PlotManager
 import importlib
 train_data = importlib.import_module("train-data")
+from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 
 
-# ── HF Token ─────────────────────────────────────────────────────
-
-def get_hf_token():
-    import getpass
-    from huggingface_hub import login as hf_login
-    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-    if not token:
-        token = getpass.getpass("HF token (write a ScortexIA/laurelia): ").strip()
-    os.environ["HF_TOKEN"] = token
-    hf_login(token=token)
-    print("HF token aplicado globalmente")
-    return token
+class BPEWrapper:
+    def __init__(self, tok):
+        self.tokenizer = tok
+        self.vocab_size = tok.get_vocab_size()
+    def encode(self, text):
+        return self.tokenizer.encode(text).ids
+    def decode(self, ids):
+        return self.tokenizer.decode(ids, skip_special_tokens=False)
 
 
 # ── Sigma scheduling ──────────────────────────────────────────────
@@ -48,7 +47,7 @@ def get_block_sigmas(config):
     return sigmas
 
 
-def sample_sigma_in_block(block_idx, block_sigmas, gamma=0.05, size=1):
+def sample_sigma_in_block(block_idx, block_sigmas, gamma=0.05):
     """Muestra σ del rango del bloque con overlap γ."""
     sigma_min_b = block_sigmas[block_idx]
     sigma_max_b = block_sigmas[block_idx + 1]
@@ -59,7 +58,7 @@ def sample_sigma_in_block(block_idx, block_sigmas, gamma=0.05, size=1):
 
     cdf_min = norm.cdf((log_min - (-1.2)) / 1.2)
     cdf_max = norm.cdf((log_max - (-1.2)) / 1.2)
-    u = np.random.uniform(max(cdf_min, 0.0), min(cdf_max, 1.0), size=size)
+    u = np.random.uniform(max(cdf_min, 0.0), min(cdf_max, 1.0))
     log_sigma = -1.2 + 1.2 * norm.ppf(u)
     return np.exp(log_sigma).astype(np.float32)
 
@@ -70,70 +69,71 @@ def edm_weight(sigma, sigma_data=0.5):
     return (sigma**2 + sigma_data**2) / (sigma * sigma_data)**2
 
 
-# ── BPE Tokenizer ────────────────────────────────────────────────
+# ── Tokenizer ─────────────────────────────────────────────────────
 
-class BPEWrapper:
-    def __init__(self, tok):
-        self.tokenizer = tok
-        self.vocab_size = tok.get_vocab_size()
-    def encode(self, text):
-        return self.tokenizer.encode(text).ids
-    def decode(self, ids):
-        return self.tokenizer.decode(ids, skip_special_tokens=False)
-
-
-def get_tokenizer(config):
-    from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
-    tok_path = os.path.join(_DIR, "tokenizer_test_16k.json")
-    wiki = os.path.join(_DIR, "wiki_tokenizer_50mb.txt")
-
-    # Descargar wiki si no existe
-    import importlib
-    wikipedia = importlib.import_module("wikipedia")
-    if not os.path.exists(wiki) or os.path.getsize(wiki) < 50_000_000:
-        wikipedia.download_wikipedia_50mb(wiki)
-
-    if not os.path.exists(tok_path):
-        print("Entrenando BPE 16k...")
-        tok = Tokenizer(models.BPE())
-        tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
-        tok.decoder = decoders.ByteLevel()
-        trainer = trainers.BpeTrainer(vocab_size=config.emb_num, special_tokens=["eos_token"])
-
-        def iter_chunks(path, mb=5):
-            with open(path, "rb") as fh:
-                while True:
-                    chunk = fh.read(mb * 1024 * 1024)
-                    if not chunk:
-                        break
-                    yield chunk.decode("utf-8", errors="ignore")
-
-        tok.train_from_iterator(iter_chunks(wiki), trainer=trainer)
-        tok.save(tok_path)
-
-    tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
-    config.emb_num = tokenizer.vocab_size
-    print(f"Vocab: {tokenizer.vocab_size}")
-    return tokenizer
+def train_tokenizer_from_wiki(vocab_size, output_path):
+    from dataset import download_tokenizer_corpus
+    corpus = download_tokenizer_corpus()
+    tok = Tokenizer(models.BPE())
+    tok.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tok.decoder = decoders.ByteLevel()
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["eos_token"])
+    with open(corpus, "r", encoding="utf-8") as f:
+        tok.train_from_iterator([f.read()], trainer=trainer)
+    tok.save(output_path)
+    return output_path
 
 
 # ── Training ──────────────────────────────────────────────────────
 
-def train(config):
-    # HF token al inicio
-    get_hf_token()
+config = Config()
+tok_path = os.path.join(_DIR, "tokenizer.json")
+plot_interval = 256
+
+
+def main():
+    test_mode = len(sys.argv) > 1 and sys.argv[1].endswith(".txt")
+    txt_path = sys.argv[1] if test_mode else None
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
-    print(f"Config: dim={config.dim} lay={config.layers} heads={config.heads} "
-          f"kv={config.kv_groups} blocks={config.num_blocks} "
-          f"seq={config.block_size} bs={config.batch_size} lr={config.learning_rate}")
 
-    # Tokenizer
-    tokenizer = get_tokenizer(config)
+    repo_id = "ScortexIA/laurelia"
+    revision = "doc-llm"
+    hf = pusher = None
+    if not test_mode:
+        hf = HFManager(repo_id=repo_id, revision=revision)
+        hf._get_token()
+        pusher = PeriodicPusher(hf, interval_minutes=20)
+    pm = PlotManager(hf if not test_mode else None, save_dir=_DIR, plot_interval=plot_interval)
 
-    # Modelo
-    model = DofiLLM(config).to(device)
+    if test_mode:
+        dtype = torch.float32
+    else:
+        prec = input("Precision (n=f32, b=bf16): ").strip().lower()
+        dtype = torch.bfloat16 if prec == "b" else torch.float32
+    print(f"  Compute: {dtype}")
+
+    tokenizer = None
+    if os.path.exists(tok_path):
+        tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
+    elif hf and hf.tokenizer_exists():
+        try:
+            local_tok = hf.download_tokenizer(tok_path)
+            tokenizer = BPEWrapper(Tokenizer.from_file(local_tok))
+        except:
+            pass
+    if tokenizer is None:
+        if hf:
+            train_tokenizer_from_wiki(config.emb_num, tok_path)
+            tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
+            hf.upload_tokenizer(tok_path)
+        else:
+            sys.exit("No tokenizer found")
+    config.emb_num = tokenizer.vocab_size
+    print(f"Vocab: {tokenizer.vocab_size}")
+
+    model = DofiLLM(config).to(device).to(dtype=dtype)
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=config.learning_rate,
@@ -145,20 +145,37 @@ def train(config):
     block_sigmas = get_block_sigmas(config)
     print(f"Block sigmas: {block_sigmas}")
 
-    # Dataset de laurelia
-    bi = input("Block [0]: ").strip()
-    block_idx = int(bi) if bi else 0
-    sd = train_data.TrainData(block_idx=block_idx)
-    sd.load_tokens(tokenizer)
-    tokens = sd.get_tokens()
-    n = len(tokens)
-    print(f"Tokens: {n:,}")
+    ckpt_path = os.path.join(_DIR, "checkpoint.pt")
+    step = 0
 
-    # Scheduler
+    if not test_mode and os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location='cpu')
+        ckpt["model"].pop("lm_head.weight", None)
+        model.load_state_dict(ckpt["model"], strict=False)
+        step = ckpt.get("step", 0)
+        del ckpt
+        torch.cuda.empty_cache()
+        print(f"Loaded checkpoint: step {step}")
+
+    # Dataset
     seq_len = config.block_size
-    n_seq = (n - seq_len - 1) // seq_len
-    steps_per_epoch = n_seq // config.batch_size
-    total_steps = steps_per_epoch * 200000
+    if test_mode:
+        with open(txt_path, "r", encoding="utf-8") as f:
+            all_tokens = tokenizer.encode(f.read())
+        n = len(all_tokens)
+        total_steps = ((n - seq_len - 1) // (config.batch_size * seq_len)) * 10
+    else:
+        bi = input("Block [0]: ").strip()
+        block_idx = int(bi) if bi else 0
+        sd = train_data.TrainData(block_idx=block_idx)
+        sd.load_tokens(tokenizer)
+        tokens = sd.get_tokens()
+        n = len(tokens)
+        n_seq = (n - seq_len - 1) // seq_len
+        steps_per_epoch = n_seq // config.batch_size
+        total_steps = steps_per_epoch * 200000
+
+    # WSD schedule
     num_warmup = config.warm_up
     num_decay = int(total_steps * 0.15)
     num_stable = total_steps - num_warmup - num_decay
@@ -174,28 +191,41 @@ def train(config):
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # Training loop
+    emb_p = model.embeddings.weight.numel()
+    layer_p = sum(p.numel() for b in model.blocks for p in b.parameters())
+    print(f"Params: emb={emb_p:,} + {config.layers}capas={layer_p:,} = {emb_p + layer_p:,}")
+    print(f"dim={config.dim} lay={config.layers} heads={config.heads} kv={config.kv_groups} "
+          f"blocks={config.num_blocks} seq={seq_len} bs={config.batch_size} lr={config.learning_rate}")
+    print(f"Tokens: {n:,}")
+
     model.train()
     t0 = time.time()
-    step = 0
-    history = []
+    last_rpt_time = t0
+    last_rpt_step = 0
 
     while True:
-        tokens = sd.get_tokens()
-        n_seq = (len(tokens) - seq_len - 1) // seq_len
+        if test_mode:
+            tokens = all_tokens
+            n_seq = (len(tokens) - seq_len - 1) // seq_len
+        else:
+            tokens = sd.get_tokens()
+            n_seq = (len(tokens) - seq_len - 1) // seq_len
 
         if n_seq <= 0:
-            sd.next_block()
+            if not test_mode:
+                sd.next_block()
             continue
 
         for batch_start in range(0, n_seq, config.batch_size):
+            if step >= total_steps:
+                break
             batch_end = min(batch_start + config.batch_size, n_seq)
 
             # 1. Eleg bloque al azar
-            block_idx = random.randint(0, config.num_blocks - 1)
+            dblock_idx = random.randint(0, config.num_blocks - 1)
 
             # 2. Muestrear σ del rango del bloque
-            sigma_np = sample_sigma_in_block(block_idx, block_sigmas, gamma=config.gamma)
+            sigma_np = sample_sigma_in_block(dblock_idx, block_sigmas, gamma=config.gamma)
             sigma = torch.tensor(sigma_np, device=device)
 
             # 3. Preparar batch
@@ -210,7 +240,7 @@ def train(config):
             target_ids = torch.cat(y_list, dim=0)
 
             # 4. Forward por el bloque
-            logits = model.forward_block(block_idx, input_ids, sigma)
+            logits = model.forward_block(dblock_idx, input_ids, sigma)
 
             # 5. Loss: weighted cross-entropy
             loss = F.cross_entropy(
@@ -222,6 +252,8 @@ def train(config):
 
             # 6. Backward
             (loss / config.grad_acc).backward()
+            loss_val = loss.item()
+            del logits, loss
 
             if (batch_start // config.batch_size + 1) % config.grad_acc == 0 or batch_end >= n_seq:
                 grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
@@ -231,26 +263,37 @@ def train(config):
                 optimizer.zero_grad()
                 step += 1
 
-                if step % 100 == 0:
+                if step % 10 == 0:
                     now = time.time()
-                    tps = step * config.batch_size * config.grad_acc * seq_len / max(now - t0, 0.001)
-                    print(f"s{step} loss {loss.item():.4f} w={w:.3f} lr {lr_curr:.6f} "
-                          f"grad {grad_norm:.3f} block={block_idx} σ={sigma_np[0]:.4f} {tps:.0f}t/s")
-                    history.append({"step": step, "loss": loss.item(), "block": block_idx,
-                                    "sigma": float(sigma_np[0]), "lr": lr_curr})
+                    tok = (step - last_rpt_step) * config.batch_size * config.grad_acc * seq_len
+                    tps = tok / max(now - last_rpt_time, 0.001)
+                    print(f"s{step} loss {loss_val:.4f} w={w:.3f} lr {lr_curr:.6f} "
+                          f"grad {grad_norm:.3f} dblock={dblock_idx} σ={sigma_np:.4f} {tps:.0f}t/s")
+                    last_rpt_time = now
+                    last_rpt_step = step
+                    pm.log(step, loss_val, lr_curr, tps)
 
-        sd.next_block()
+                if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
+                    state = model.state_dict()
+                    state.pop("lm_head.weight", None)
+                    ckpt = {"step": step, "model": state}
+                    torch.save(ckpt, ckpt_path)
+                    pusher.maybe_push(ckpt_path, None, None, step)
+                    pm.plot(step)
+                    pm.upload(step)
+
+        if not test_mode:
+            sd.next_block()
+
+    if not test_mode and hf:
+        state = model.state_dict()
+        state.pop("lm_head.weight", None)
+        ckpt = {"step": step, "model": state}
+        torch.save(ckpt, ckpt_path)
+        hf.upload_checkpoint(ckpt_path, step=step)
 
     print(f"Done! {step} steps in {time.time()-t0:.1f}s")
 
-    hist_path = os.path.join(_DIR, "train_history.json")
-    with open(hist_path, "w") as f:
-        json.dump(history, f, indent=2)
-    print(f"History: {hist_path}")
-
-    return model
-
 
 if __name__ == "__main__":
-    config = Config()
-    train(config)
+    main()
