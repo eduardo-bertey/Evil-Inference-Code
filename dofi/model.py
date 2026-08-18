@@ -110,8 +110,7 @@ class Attention(nn.Module):
         self.share_k = share_k
 
         self.q_proj = nn.Linear(config.dim, self.num_heads * self.head_dim, bias=False)
-        if not share_k:
-            self.kv_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
+        self.kv_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
         self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
         self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, 'rotary_pct', 0.25))
         self.attn_dropout = nn.Dropout(config.drop)
@@ -127,7 +126,7 @@ class Attention(nn.Module):
         B, T, D = x.shape
         q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
 
-        if self.share_k:
+        if self.share_k and k_shared is not None:
             q, _ = self.rope(q, q, 0)
             kv = k_shared
         else:
@@ -210,13 +209,13 @@ class Block(nn.Module):
             nn.Linear(config.ffn_dim, config.dim),
         )
 
-    def forward(self, x, sigma_cond):
+    def forward(self, x, sigma_cond, k_shared=None):
         # AdaLN para attention
         shift_msa, scale_msa, gate_msa = self.adaLN_attn(sigma_cond).chunk(3, dim=-1)
 
         h = self.ln_1(x)
         h = modulate(h, shift_msa, scale_msa)
-        attn_out, _ = self.attn(h)
+        attn_out, kv = self.attn(h, k_shared=k_shared)
         x = x + gate_msa.unsqueeze(1) * attn_out
 
         # AdaLN para FFN
@@ -227,7 +226,7 @@ class Block(nn.Module):
         ffn_out = self.ffn(h)
         x = x + gate_mlp.unsqueeze(1) * ffn_out
 
-        return x
+        return x, kv
 
     def forward_with_cache(self, x, offset, cache, k_shared_full, sigma_cond):
         # Para inference: mismo forward pero con cache
@@ -301,8 +300,10 @@ class DofiLLM(nn.Module):
         x = self.embeddings(input_ids)
 
         layer_indices = self.get_block_layers(block_idx)
+        k_prev = None
         for i in layer_indices:
-            x = self.blocks[i](x, sigma_cond)
+            x, kv = self.blocks[i](x, sigma_cond, k_shared=k_prev)
+            k_prev = kv
 
         x = self.norm_f(x)
         logits = self.lm_head(x)
@@ -321,8 +322,10 @@ class DofiLLM(nn.Module):
         sigma_cond = self.timestep_embedder(sigma)
         x = self.embeddings(input_ids)
 
+        k_prev = None
         for block in self.blocks:
-            x = block(x, sigma_cond)
+            x, kv = block(x, sigma_cond, k_shared=k_prev)
+            k_prev = kv
 
         x = self.norm_f(x)
         logits = self.lm_head(x)
@@ -354,8 +357,6 @@ class DofiLLM(nn.Module):
             dx/dσ = (x - predict(x, σ)) / σ
         """
         sigmas = get_discrete_sigmas(num_steps, sigma_min, sigma_max, dblock=True)
-        sigma_cond = self.timestep_embedder(sigmas[0])
-        x = self.norm_f(x)
 
         for i in range(len(sigmas) - 1):
             sigma_cur = sigmas[i]
@@ -364,8 +365,10 @@ class DofiLLM(nn.Module):
             # Forward por todos los bloques con σ actual
             h = x
             sc = self.timestep_embedder(sigma_cur)
+            k_prev = None
             for block in self.blocks:
-                h = block(h, sc)
+                h, kv = block(h, sc, k_shared=k_prev)
+                k_prev = kv
 
             # Euler step
             x = x + (sigma_next - sigma_cur) * (h - x) / sigma_cur
@@ -373,8 +376,10 @@ class DofiLLM(nn.Module):
         # Logits finales en σ_min
         sc_min = self.timestep_embedder(sigmas[-1])
         h = x
+        k_prev = None
         for block in self.blocks:
-            h = block(h, sc_min)
+            h, kv = block(h, sc_min, k_shared=k_prev)
+            k_prev = kv
         logits = self.lm_head(h)
         return logits
 
