@@ -184,15 +184,37 @@ def main():
 
     ckpt_path = os.path.join(_DIR, "checkpoint.pt")
     step = 0
+    ckpt_block = 0
 
-    if not test_mode and os.path.exists(ckpt_path):
-        ckpt = torch.load(ckpt_path, map_location='cpu')
-        ckpt["model"].pop("lm_head.weight", None)
-        model.load_state_dict(ckpt["model"], strict=False)
-        step = ckpt.get("step", 0)
-        del ckpt
-        torch.cuda.empty_cache()
-        print(f"Loaded checkpoint: step {step}")
+    if not test_mode:
+        loaded = False
+        if os.path.exists(ckpt_path):
+            ckpt = torch.load(ckpt_path, map_location='cpu')
+            ckpt["model"].pop("lm_head.weight", None)
+            model.load_state_dict(ckpt["model"], strict=False)
+            step = ckpt.get("step", 0)
+            ckpt_block = ckpt.get("block_idx", 0)
+            del ckpt
+            torch.cuda.empty_cache()
+            print(f"Loaded checkpoint: step {step} block {ckpt_block}")
+            loaded = True
+        elif hf and hf.download_checkpoint(ckpt_path):
+            ckpt = torch.load(ckpt_path, map_location='cpu')
+            ckpt["model"].pop("lm_head.weight", None)
+            model.load_state_dict(ckpt["model"], strict=False)
+            step = ckpt.get("step", 0)
+            ckpt_block = ckpt.get("block_idx", 0)
+            del ckpt
+            torch.cuda.empty_cache()
+            print(f"Loaded HF checkpoint: step {step} block {ckpt_block}")
+            loaded = True
+
+        if loaded:
+            print("\n── Generation test ──")
+            for p in ["hola", "que es la inteligencia artificial", "en un lugar de la mancha"]:
+                sample = generate_sample(model, tokenizer, device, prompt=p, max_new=50)
+                print(f"  [{p}] → {sample}")
+            print("── End test ──\n")
 
     # Dataset
     seq_len = config.block_size
@@ -202,8 +224,8 @@ def main():
         n = len(all_tokens)
         total_steps = ((n - seq_len - 1) // (config.batch_size * seq_len)) * 10
     else:
-        bi = input("Block [0]: ").strip()
-        block_idx = int(bi) if bi else 0
+        bi = input(f"Block [{ckpt_block}]: ").strip()
+        block_idx = int(bi) if bi else ckpt_block
         sd = train_data.TrainData(block_idx=block_idx)
         sd.load_tokens(tokenizer)
         tokens = sd.get_tokens()
@@ -317,7 +339,7 @@ def main():
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
                     state = model.state_dict()
                     state.pop("lm_head.weight", None)
-                    ckpt = {"step": step, "model": state}
+                    ckpt = {"step": step, "block_idx": sd.block_idx if not test_mode else 0, "model": state}
                     torch.save(ckpt, ckpt_path)
                     pusher.maybe_push(ckpt_path, None, None, step)
                     pm.plot(step)
@@ -329,7 +351,7 @@ def main():
     if not test_mode and hf:
         state = model.state_dict()
         state.pop("lm_head.weight", None)
-        ckpt = {"step": step, "model": state}
+        ckpt = {"step": step, "block_idx": sd.block_idx if not test_mode else 0, "model": state}
         torch.save(ckpt, ckpt_path)
         hf.upload_checkpoint(ckpt_path, step=step)
 
