@@ -280,7 +280,19 @@ def main():
                 break
             batch_end = min(batch_start + config.batch_size, n_seq)
 
+            # 3. Preparar batch
+            x_list, y_list = [], []
+            for i in range(batch_start, batch_end):
+                idx = i * seq_len
+                x = torch.tensor(tokens[idx:idx + seq_len], dtype=torch.long, device=device).unsqueeze(0)
+                y = torch.tensor(tokens[idx + 1:idx + seq_len + 1], dtype=torch.long, device=device).unsqueeze(0)
+                x_list.append(x)
+                y_list.append(y)
+            input_ids = torch.cat(x_list, dim=0)
+            target_ids = torch.cat(y_list, dim=0)
+
             if config.sequential_blocks:
+                # 4 bloques en orden, loss promedio
                 total_loss = 0.0
                 for b in range(config.num_blocks):
                     sigma_np_b = sample_sigma_in_block(b, block_sigmas, gamma=config.gamma)
@@ -317,8 +329,7 @@ def main():
 
             # 6. Backward
             (loss / config.grad_acc).backward()
-            loss_val = loss.item()
-            del logits, loss
+            del loss
 
             if (batch_start // config.batch_size + 1) % config.grad_acc == 0 or batch_end >= n_seq:
                 grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
@@ -332,8 +343,12 @@ def main():
                     now = time.time()
                     tok = (step - last_rpt_step) * config.batch_size * config.grad_acc * seq_len
                     tps = tok / max(now - last_rpt_time, 0.001)
-                    print(f"s{step} loss {loss_val:.4f} w={w:.3f} lr {lr_curr:.6f} "
-                          f"grad {grad_norm:.3f} dblock={dblock_idx} σ={sigma_np:.4f} {tps:.0f}t/s")
+                    if config.sequential_blocks:
+                        print(f"s{step} loss {loss_val:.4f} lr {lr_curr:.6f} "
+                              f"grad {grad_norm:.3f} seq 4blks {tps:.0f}t/s")
+                    else:
+                        print(f"s{step} loss {loss_val:.4f} w={w:.3f} lr {lr_curr:.6f} "
+                              f"grad {grad_norm:.3f} dblock={dblock_idx} σ={sigma_np:.4f} {tps:.0f}t/s")
                     last_rpt_time = now
                     last_rpt_step = step
                     pm.log(step, loss_val, lr_curr, tps)
