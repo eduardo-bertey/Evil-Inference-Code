@@ -97,7 +97,7 @@ def generate_sample(model, tokenizer, device, prompt="hola", max_new=50):
     out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40,
                          sigma=0.002, use_ode=False)
     model.train()
-    return tokenizer.decode(out[0].tolist(), skip_special_tokens=False)
+    return tokenizer.decode(out[0].tolist())
 
 
 def generate_mode():
