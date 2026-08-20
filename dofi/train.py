@@ -261,6 +261,7 @@ def main():
     t0 = time.time()
     last_rpt_time = t0
     last_rpt_step = 0
+    seq_block_counter = 0
 
     while True:
         if test_mode:
