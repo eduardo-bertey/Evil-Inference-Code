@@ -90,7 +90,57 @@ tok_path = os.path.join(_DIR, "tokenizer.json")
 plot_interval = 256
 
 
+def generate_mode():
+    """Modo generación: carga checkpoint y genera texto."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Device: {device}")
+
+    hf = HFManager(repo_id="ScortexIA/laurelia", revision="dofi")
+    hf._get_token()
+
+    tok_path = os.path.join(_DIR, "tokenizer.json")
+    if not os.path.exists(tok_path):
+        if hf.tokenizer_exists():
+            hf.download_tokenizer(tok_path)
+        else:
+            sys.exit("No tokenizer found")
+    tokenizer = BPEWrapper(Tokenizer.from_file(tok_path))
+    config.emb_num = tokenizer.vocab_size
+    print(f"Vocab: {tokenizer.vocab_size}")
+
+    model = DofiLLM(config).to(device)
+    ckpt_path = os.path.join(_DIR, "checkpoint.pt")
+    if os.path.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location=device)
+        ckpt["model"].pop("lm_head.weight", None)
+        model.load_state_dict(ckpt["model"], strict=False)
+        print(f"Loaded checkpoint step {ckpt.get('step', '?')}")
+    else:
+        print("No checkpoint found, generating with random weights")
+    model.eval()
+
+    sigma = float(input("Sigma [0.002]: ").strip() or "0.002")
+    max_len = int(input("Max tokens [200]: ").strip() or "200")
+    temp = float(input("Temperature [0.8]: ").strip() or "0.8")
+
+    while True:
+        prompt = input("\nPrompt: ").strip()
+        if not prompt:
+            break
+        ids = tokenizer.encode(prompt)
+        ids = torch.tensor([ids], dtype=torch.long, device=device)
+        with torch.no_grad():
+            out = model.generate(ids, max_new_tokens=max_len, temperature=temp,
+                                 sigma=sigma, use_ode=False)
+        text = tokenizer.decode(out[0].tolist())
+        print(f"\n{text}\n{'='*60}")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "--generate":
+        generate_mode()
+        return
+
     test_mode = len(sys.argv) > 1 and sys.argv[1].endswith(".txt")
     txt_path = sys.argv[1] if test_mode else None
 
