@@ -376,54 +376,72 @@ class DofiLLM(nn.Module):
         return logits, new_caches
 
     @torch.no_grad()
-    def ode_solve(self, x, num_steps=20, sigma_min=0.002, sigma_max=80.0):
-        """ODE solver: denoise x pasando por todos los bloques con σ decreciente.
+    def ode_solve(self, input_ids, num_steps=4, sigma_min=0.002, sigma_max=80.0):
+        """ODE para noise_on_labels: denoising iterativo del embedding del siguiente token.
 
-        Cada paso = 1 Euler step de la reverse diffusion ODE:
-            dx/dσ = (x - predict(x, σ)) / σ
+        Cada paso corre UN bloque (4 capas), total = 4 bloques = 16 capas = 1 forward completo.
         """
+        context = self.embeddings(input_ids)  # (B, L, D) embeds limpios del contexto
+        B, L, D = context.shape
+
         sigmas = get_discrete_sigmas(num_steps, sigma_min, sigma_max, dblock=True)
 
-        for i in range(len(sigmas) - 1):
-            sigma_cur = sigmas[i]
-            sigma_next = sigmas[i + 1]
+        # zt = embedding ruidoso del siguiente token (random)
+        zt = torch.randn(B, 1, D, device=input_ids.device, dtype=context.dtype) * sigmas[0]
 
-            # Forward por todos los bloques con σ actual
-            h = x
-            sc = self.timestep_embedder(sigma_cur)
+        for i in range(len(sigmas) - 1):
+            sigma = sigmas[i]
+            next_sigma = sigmas[i + 1]
+
+            # Cada paso usa UN bloque
+            block_idx = min(i, self.config.num_blocks - 1)
+
+            # Concatenar contexto + embedding ruidoso
+            x = torch.cat([context, zt], dim=1)
+
+            # Forward solo por las capas de este bloque
+            sc = self.timestep_embedder(sigma)
             k_prev = None
-            for block in self.blocks:
-                h, kv = block(h, sc, k_shared=k_prev)
+            for j in self.get_block_layers(block_idx):
+                x, kv = self.blocks[j](x, sc, k_shared=k_prev)
                 k_prev = kv
 
-            # Euler step
-            x = x + (sigma_next - sigma_cur) * (h - x) / sigma_cur
+            # Logits de la posición del target (última)
+            logits = self.lm_head(x[:, -1:, :])
 
-        # Logits finales en σ_min
-        sc_min = self.timestep_embedder(sigmas[-1])
-        h = x
+            # Convertir logits a embedding space
+            probs = F.softmax(logits / 0.7, dim=-1)
+            denoised = F.linear(probs, self.embeddings.weight)
+
+            # Euler step: dx/dσ = (x - denoised) / σ
+            d = (zt - denoised) / sigma
+            dt = next_sigma - sigma
+            zt = zt + dt * d
+
+        # Forward final por TODOS los bloques para logits limpios
+        x = torch.cat([context, zt], dim=1)
+        sc = self.timestep_embedder(sigmas[-1])
         k_prev = None
         for block in self.blocks:
-            h, kv = block(h, sc_min, k_shared=k_prev)
+            x, kv = block(x, sc, k_shared=k_prev)
             k_prev = kv
-        logits = self.lm_head(h)
-        return logits
+        return self.lm_head(x[:, -1:, :])
 
     @torch.no_grad()
     def generate(self, input_ids, max_new_tokens=100, temperature=0.8, top_k=40,
                  sigma=0.002, use_ode=False, ode_steps=20):
-        """Generación con KV cache.
+        """Generación.
 
-        use_ode=True: ODE solver con σ decreciente (más lento, mejor calidad).
-        use_ode=False: σ fijo (rápido, como Transformer normal).
+        noise_on_labels: siempre usa ODE (denoising iterativo).
+        noise_on_input: KV cache normal (rápido).
         """
         device = input_ids.device
 
-        if use_ode:
+        if self.config.noise_on_labels or use_ode:
+            # ODE: denoising iterativo para noise_on_labels
             for _ in range(max_new_tokens):
-                ctx = input_ids
-                ctx_exp = ctx.unsqueeze(0) if ctx.dim() == 1 else ctx
-                logits = self.ode_solve(ctx_exp, num_steps=ode_steps)
+                ctx = input_ids.unsqueeze(0) if input_ids.dim() == 1 else input_ids
+                logits = self.ode_solve(ctx, num_steps=ode_steps)
                 next_logits = logits[:, -1, :] / temperature
                 if top_k > 0:
                     v, _ = torch.topk(next_logits, min(top_k, next_logits.size(-1)))
