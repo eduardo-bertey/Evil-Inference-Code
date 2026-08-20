@@ -296,6 +296,10 @@ class DofiLLM(nn.Module):
         start = block_idx * self.config.layers_per_block
         return list(range(start, start + self.config.layers_per_block))
 
+    def normalize_embeddings(self, x):
+        """L2 normalize embeddings como DiffusionBlocks."""
+        return F.normalize(x, p=2, dim=-1)
+
     def forward_block(self, block_idx, input_ids, sigma, target_ids=None):
         """Forward solo por un bloque de capas (para training).
 
@@ -313,11 +317,11 @@ class DofiLLM(nn.Module):
         c_noise = 0.25 * math.log(max(sigma_val, 1e-8))
         sigma_cond = self.timestep_embedder(torch.tensor(c_noise, device=input_ids.device, dtype=torch.float32))
 
-        x = self.embeddings(input_ids)
+        x = self.normalize_embeddings(self.embeddings(input_ids))
 
         if self.config.noise_on_labels and target_ids is not None:
             # DiffusionBlocks: ruido en LABEL embeddings
-            z = self.embeddings(target_ids)
+            z = self.normalize_embeddings(self.embeddings(target_ids))
             if sigma_val > 0:
                 zt = z + torch.randn_like(z) * sigma_val
             else:
@@ -349,7 +353,7 @@ class DofiLLM(nn.Module):
 
         # Forward completo (inference)
         sigma_cond = self.timestep_embedder(sigma)
-        x = self.embeddings(input_ids)
+        x = self.normalize_embeddings(self.embeddings(input_ids))
 
         k_prev = None
         for block in self.blocks:
@@ -366,7 +370,7 @@ class DofiLLM(nn.Module):
             sigma = torch.tensor(sigma, device=input_ids.device, dtype=torch.float32)
         c_noise = 0.25 * torch.log(sigma)
         sigma_cond = self.timestep_embedder(c_noise)
-        x = self.embeddings(input_ids)
+        x = self.normalize_embeddings(self.embeddings(input_ids))
 
         new_caches = []
         k_prev_full = None
@@ -387,7 +391,7 @@ class DofiLLM(nn.Module):
 
         Cada paso corre UN bloque (4 capas), total = 4 bloques = 16 capas.
         """
-        context = self.embeddings(input_ids)  # (B, L, D)
+        context = self.normalize_embeddings(self.embeddings(input_ids))  # (B, L, D)
         B, L, D = context.shape
         sigma_data = self.config.sigma_data
 
