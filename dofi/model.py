@@ -385,6 +385,7 @@ class DofiLLM(nn.Module):
         B, L, D = context.shape
 
         sigmas = get_discrete_sigmas(num_steps, sigma_min, sigma_max, dblock=True)
+        sigmas = sigmas.to(input_ids.device)
 
         # zt = embedding ruidoso del siguiente token (random)
         zt = torch.randn(B, 1, D, device=input_ids.device, dtype=context.dtype) * sigmas[0]
