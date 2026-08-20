@@ -39,9 +39,6 @@ class Config:
     gamma = 0.1  # overlap entre bloques (paper usa 0.1 para text)
     sigma_data = 0.5
 
-    # Capas pares comparten K
-    share_k_even = True
-
     # Condicionamiento
     cond_hidden_size = 64  # dim // 8
 
@@ -107,18 +104,17 @@ class AdaLN(nn.Module):
 
 
 class Attention(nn.Module):
-    """Atención Q–K=V + XSA. Sin LISA. Capas pares comparten K."""
+    """Atención QKV + XSA estándar. Sin LISA. Sin share K."""
 
-    def __init__(self, config, layer_idx, share_k=False):
+    def __init__(self, config, layer_idx):
         super().__init__()
         self.num_heads = config.heads
         self.num_kv_groups = config.kv_groups
         self.head_dim = config.dim // config.heads
-        self.share_k = share_k
 
         self.q_proj = nn.Linear(config.dim, self.num_heads * self.head_dim, bias=False)
-        if not share_k:
-            self.kv_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
         self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
         self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, 'rotary_pct', 0.25))
         self.attn_dropout = nn.Dropout(config.drop)
@@ -130,18 +126,12 @@ class Attention(nn.Module):
         vn = vn[:, :, -S:, :]
         return y - (y * vn).sum(dim=-1, keepdim=True) * vn
 
-    def forward(self, x, k_shared=None):
+    def forward(self, x):
         B, T, D = x.shape
         q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
-
-        if self.share_k and k_shared is not None:
-            q, _ = self.rope(q, q, 0)
-            kv = k_shared
-        else:
-            kv = self.kv_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
-            q, kv = self.rope(q, kv, 0)
-        k = kv
-        v = kv
+        k = self.k_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
+        v = self.v_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
+        q, k = self.rope(q, k, 0)
 
         k = repeat_kv(k, self.num_heads, self.num_kv_groups)
         v = repeat_kv(v, self.num_heads, self.num_kv_groups)
@@ -158,30 +148,25 @@ class Attention(nn.Module):
         z = self._xsa(y, v)
         z = z.transpose(1, 2).contiguous().view(B, T, -1)
 
-        return self.o_proj(z), kv
+        return self.o_proj(z)
 
-    def forward_with_cache(self, x, offset, cache, k_shared_full=None):
+    def forward_with_cache(self, x, offset, cache):
         B, S_new, _ = x.shape
         q_new = self.q_proj(x).view(B, S_new, self.num_heads, self.head_dim)
+        k_new = self.k_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
+        v_new = self.v_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
+        q_new, k_new = self.rope(q_new, k_new, offset)
 
-        if self.share_k:
-            q_new, _ = self.rope(q_new, q_new, offset)
-            k_full = k_shared_full
-            new_cache = None
+        if cache is not None:
+            k_full = torch.cat([cache[0], k_new], dim=1)
+            v_full = torch.cat([cache[1], v_new], dim=1)
         else:
-            kv_new = self.kv_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
-            q_new, kv_new = self.rope(q_new, kv_new, offset)
-            if cache is not None:
-                k_full = torch.cat([cache[0], kv_new], dim=1)
-            else:
-                k_full = kv_new
-            new_cache = (k_full.clone(),)
+            k_full = k_new
+            v_full = v_new
+        new_cache = (k_full.clone(), v_full.clone())
 
-        k = k_full
-        v = k_full
-
-        k_exp = repeat_kv(k, self.num_heads, self.num_kv_groups)
-        v_exp = repeat_kv(v, self.num_heads, self.num_kv_groups)
+        k_exp = repeat_kv(k_full, self.num_heads, self.num_kv_groups)
+        v_exp = repeat_kv(v_full, self.num_heads, self.num_kv_groups)
 
         q = q_new.transpose(1, 2)
         k = k_exp.transpose(1, 2)
@@ -194,13 +179,13 @@ class Attention(nn.Module):
         z = self._xsa(y, v)
         z = z.transpose(1, 2).contiguous().view(B, S_new, -1)
 
-        return self.o_proj(z), k_full, new_cache
+        return self.o_proj(z), new_cache
 
 
 class Block(nn.Module):
     """Bloque transformer con AdaLN para condicionamiento σ."""
 
-    def __init__(self, config, layer_idx, share_k=False):
+    def __init__(self, config, layer_idx):
         super().__init__()
         self.layer_idx = layer_idx
 
@@ -209,7 +194,7 @@ class Block(nn.Module):
         self.adaLN_ffn = AdaLN(config.cond_hidden_size, 3 * config.dim)
 
         self.ln_1 = nn.LayerNorm(config.dim)
-        self.attn = Attention(config, layer_idx, share_k=share_k)
+        self.attn = Attention(config, layer_idx)
         self.ln_2 = nn.LayerNorm(config.dim)
         self.ffn = nn.Sequential(
             nn.Linear(config.dim, config.ffn_dim),
@@ -217,13 +202,13 @@ class Block(nn.Module):
             nn.Linear(config.ffn_dim, config.dim),
         )
 
-    def forward(self, x, sigma_cond, k_shared=None):
+    def forward(self, x, sigma_cond):
         # AdaLN para attention
         shift_msa, scale_msa, gate_msa = self.adaLN_attn(sigma_cond).chunk(3, dim=-1)
 
         h = self.ln_1(x)
         h = modulate(h, shift_msa, scale_msa)
-        attn_out, kv = self.attn(h, k_shared=k_shared)
+        attn_out = self.attn(h)
         x = x + gate_msa.unsqueeze(1) * attn_out
 
         # AdaLN para FFN
@@ -234,15 +219,14 @@ class Block(nn.Module):
         ffn_out = self.ffn(h)
         x = x + gate_mlp.unsqueeze(1) * ffn_out
 
-        return x, kv
+        return x
 
-    def forward_with_cache(self, x, offset, cache, k_shared_full, sigma_cond):
-        # Para inference: mismo forward pero con cache
+    def forward_with_cache(self, x, offset, cache, sigma_cond):
         shift_msa, scale_msa, gate_msa = self.adaLN_attn(sigma_cond).chunk(3, dim=-1)
 
         h = self.ln_1(x)
         h = modulate(h, shift_msa, scale_msa)
-        attn_out, k_full, new_cache = self.attn.forward_with_cache(h, offset, cache, k_shared_full)
+        attn_out, new_cache = self.attn.forward_with_cache(h, offset, cache)
         x = x + gate_msa.unsqueeze(1) * attn_out
 
         shift_mlp, scale_mlp, gate_mlp = self.adaLN_ffn(sigma_cond).chunk(3, dim=-1)
@@ -252,13 +236,14 @@ class Block(nn.Module):
         ffn_out = self.ffn(h)
         x = x + gate_mlp.unsqueeze(1) * ffn_out
 
-        return x, k_full, new_cache
+        return x, new_cache
 
 
 class DofiLLM(nn.Module):
     """Transformer autoregressivo con DiffusionBlocks.
 
     16 capas, 4 bloques de 4 capas.
+    QKV standard, sin XSA, sin share K.
     Cada bloque se entrena independientemente con condicionamiento σ.
     """
 
@@ -271,7 +256,7 @@ class DofiLLM(nn.Module):
 
         # 16 capas transformer
         self.blocks = nn.ModuleList([
-            Block(config, i, share_k=(config.share_k_even and (i % 2 == 1)))
+            Block(config, i)
             for i in range(config.layers)
         ])
 
@@ -338,10 +323,8 @@ class DofiLLM(nn.Module):
                 x = x + torch.randn_like(x) * sigma_val * c_in
 
         layer_indices = self.get_block_layers(block_idx)
-        k_prev = None
         for i in layer_indices:
-            x, kv = self.blocks[i](x, sigma_cond, k_shared=k_prev)
-            k_prev = kv
+            x = self.blocks[i](x, sigma_cond)
 
         # EDM output
         x = self.norm_f(x)
@@ -365,10 +348,8 @@ class DofiLLM(nn.Module):
         sigma_cond = self.timestep_embedder(sigma)
         x = self.normalize_embeddings(self.embeddings(input_ids))
 
-        k_prev = None
         for block in self.blocks:
-            x, kv = block(x, sigma_cond, k_shared=k_prev)
-            k_prev = kv
+            x = block(x, sigma_cond)
 
         x = self.norm_f(x)
         logits = self.lm_head(x)
@@ -383,11 +364,10 @@ class DofiLLM(nn.Module):
         x = self.normalize_embeddings(self.embeddings(input_ids))
 
         new_caches = []
-        k_prev_full = None
         for i, block in enumerate(self.blocks):
             cache = caches[i] if caches is not None and i < len(caches) else None
-            x, k_prev_full, new_cache = block.forward_with_cache(
-                x, offset, cache, k_prev_full, sigma_cond
+            x, new_cache = block.forward_with_cache(
+                x, offset, cache, sigma_cond
             )
             new_caches.append(new_cache)
 
@@ -424,10 +404,8 @@ class DofiLLM(nn.Module):
             # Forward: zt primero (como CLS en DiffusionBlocks) + context
             x = torch.cat([zt * c_in, context], dim=1)
             sc = self.timestep_embedder(c_noise)
-            k_prev = None
             for j in self.get_block_layers(block_idx):
-                x, kv = self.blocks[j](x, sc, k_shared=k_prev)
-                k_prev = kv
+                x = self.blocks[j](x, sc)
 
             # EDM output en la posición del target (primera, zt va primero)
             model_out = x[:, :1, :] * c_out + zt * c_skip
@@ -451,10 +429,8 @@ class DofiLLM(nn.Module):
 
         x = torch.cat([zt * c_in, context], dim=1)
         sc = self.timestep_embedder(c_noise)
-        k_prev = None
         for block in self.blocks:
-            x, kv = block(x, sc, k_shared=k_prev)
-            k_prev = kv
+            x = block(x, sc)
         model_out = x[:, :zt.shape[1], :] * c_out + zt * c_skip
         logits = self.lm_head(model_out)
         return logits
