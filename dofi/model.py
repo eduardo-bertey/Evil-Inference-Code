@@ -26,7 +26,7 @@ class Config:
     num_blocks = 4  # 16 capas / 4 bloques = 4 capas por bloque
     layers_per_block = 4
     ffn_dim = 2048
-    block_size = 2048
+    block_size = 1024
     emb_num = 32000
     rotary_pct = 0.25
     drop = 0.0
@@ -326,7 +326,7 @@ class DofiLLM(nn.Module):
         x = self.normalize_embeddings(self.embeddings(input_ids))
 
         if self.config.noise_on_labels and target_ids is not None:
-            # DiffusionBlocks: noisy label embeddings concatenados al input
+            # DiffusionBlocks: noisy label embeddings sumados al input
             z = self.normalize_embeddings(self.embeddings(target_ids))
             if sigma_val > 0:
                 zt = z + torch.randn_like(z) * sigma_val
@@ -343,7 +343,7 @@ class DofiLLM(nn.Module):
             x, kv = self.blocks[i](x, sigma_cond, k_shared=k_prev)
             k_prev = kv
 
-        # EDM output: solo las posiciones del target
+        # EDM output: posiciones del target (primeras, zt va primero)
         x = self.norm_f(x)
         if self.config.noise_on_labels and target_ids is not None:
             target_out = x[:, :target_ids.shape[1], :]
