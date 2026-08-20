@@ -26,7 +26,7 @@ class Config:
     num_blocks = 4  # 16 capas / 4 bloques = 4 capas por bloque
     layers_per_block = 4
     ffn_dim = 2048
-    block_size = 1024
+    block_size = 2048
     emb_num = 32000
     rotary_pct = 0.25
     drop = 0.0
