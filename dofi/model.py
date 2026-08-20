@@ -412,7 +412,7 @@ class DofiLLM(nn.Module):
 
             # Convertir logits a embedding space
             probs = F.softmax(logits / 0.7, dim=-1)
-            denoised = F.linear(probs, self.embeddings.weight)
+            denoised = probs @ self.embeddings.weight
 
             # Euler step: dx/dσ = (x - denoised) / σ
             d = (zt - denoised) / sigma
