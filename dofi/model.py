@@ -45,6 +45,9 @@ class Config:
     # Condicionamiento
     cond_hidden_size = 64  # dim // 8
 
+    # DiffusionBlocks: noise on labels (True) or input (False)
+    noise_on_labels = True  # True = como DiffusionBlocks original
+
     # Training
     batch_size = 8
     grad_acc = 1
@@ -110,7 +113,8 @@ class Attention(nn.Module):
         self.share_k = share_k
 
         self.q_proj = nn.Linear(config.dim, self.num_heads * self.head_dim, bias=False)
-        self.kv_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
+        if not share_k:
+            self.kv_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
         self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
         self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, 'rotary_pct', 0.25))
         self.attn_dropout = nn.Dropout(config.drop)
@@ -292,24 +296,33 @@ class DofiLLM(nn.Module):
         start = block_idx * self.config.layers_per_block
         return list(range(start, start + self.config.layers_per_block))
 
-    def forward_block(self, block_idx, input_ids, sigma):
+    def forward_block(self, block_idx, input_ids, sigma, target_ids=None):
         """Forward solo por un bloque de capas (para training).
 
-        Congela todos los bloques excepto el activo.
-        Agrega ruido Gaussian σ a los embeddings.
-        Gradient checkpointing en el bloque activo para ahorrar VRAM.
+        noise_on_labels=True (DiffusionBlocks original):
+          - Ruido en embeddings de labels (target_ids), input limpio
+          - Modelo recibe input limpio + labels ruidosos
+        noise_on_labels=False:
+          - Ruido en embeddings de input (input_ids)
         """
         sigma_cond = self.timestep_embedder(sigma)
+        sigma_val = sigma if isinstance(sigma, float) else sigma.item()
 
         x = self.embeddings(input_ids)
 
-        # Agregar ruido según σ (diffusion forward process)
-        sigma_val = sigma if isinstance(sigma, float) else sigma.item()
-        if sigma_val > 0:
-            noise = torch.randn_like(x)
-            x = x + noise * sigma_val
+        if self.config.noise_on_labels and target_ids is not None:
+            # DiffusionBlocks: ruido en LABEL embeddings
+            z = self.embeddings(target_ids)
+            if sigma_val > 0:
+                zt = z + torch.randn_like(z) * sigma_val
+            else:
+                zt = z
+            x = x + zt
+        else:
+            # Original: ruido en INPUT embeddings
+            if sigma_val > 0:
+                x = x + torch.randn_like(x) * sigma_val
 
-        # Congelar todos excepto embeddings, timestep, y bloque activo
         layer_indices = self.get_block_layers(block_idx)
         k_prev = None
         for i in layer_indices:

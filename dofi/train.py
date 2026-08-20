@@ -239,7 +239,7 @@ def main():
             target_ids = torch.cat(y_list, dim=0)
 
             # 4. Forward por el bloque
-            logits = model.forward_block(dblock_idx, input_ids, sigma)
+            logits = model.forward_block(dblock_idx, input_ids, sigma, target_ids=target_ids)
 
             # 5. Loss: weighted cross-entropy
             loss = F.cross_entropy(
