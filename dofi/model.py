@@ -311,7 +311,7 @@ class DofiLLM(nn.Module):
         # EDM parameterization
         c_in = 1.0 / (sigma_val**2 + sigma_data**2)**0.5
         c_noise = 0.25 * math.log(max(sigma_val, 1e-8))
-        sigma_cond = self.timestep_embedder(c_noise)
+        sigma_cond = self.timestep_embedder(torch.tensor(c_noise, device=input_ids.device, dtype=torch.float32))
 
         x = self.embeddings(input_ids)
 
