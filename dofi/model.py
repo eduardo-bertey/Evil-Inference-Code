@@ -46,7 +46,7 @@ class Config:
     cond_hidden_size = 64  # dim // 8
 
     # DiffusionBlocks: noise on labels (True) or input (False)
-    noise_on_labels = True  # True = como DiffusionBlocks original
+    noise_on_labels = True  # True = como DiffusionBlocks original (necesita retrain)
 
     # Training
     batch_size = 8
@@ -301,12 +301,17 @@ class DofiLLM(nn.Module):
 
         noise_on_labels=True (DiffusionBlocks original):
           - Ruido en embeddings de labels (target_ids), input limpio
-          - Modelo recibe input limpio + labels ruidosos
+          - EDM parameterization: c_in, c_noise
         noise_on_labels=False:
           - Ruido en embeddings de input (input_ids)
         """
-        sigma_cond = self.timestep_embedder(sigma)
         sigma_val = sigma if isinstance(sigma, float) else sigma.item()
+        sigma_data = self.config.sigma_data
+
+        # EDM parameterization
+        c_in = 1.0 / (sigma_val**2 + sigma_data**2)**0.5
+        c_noise = 0.25 * math.log(max(sigma_val, 1e-8))
+        sigma_cond = self.timestep_embedder(c_noise)
 
         x = self.embeddings(input_ids)
 
@@ -317,11 +322,11 @@ class DofiLLM(nn.Module):
                 zt = z + torch.randn_like(z) * sigma_val
             else:
                 zt = z
-            x = x + zt
+            x = x + zt * c_in
         else:
             # Original: ruido en INPUT embeddings
             if sigma_val > 0:
-                x = x + torch.randn_like(x) * sigma_val
+                x = x + torch.randn_like(x) * sigma_val * c_in
 
         layer_indices = self.get_block_layers(block_idx)
         k_prev = None
@@ -359,7 +364,8 @@ class DofiLLM(nn.Module):
         """Forward con KV cache para inference."""
         if not isinstance(sigma, torch.Tensor):
             sigma = torch.tensor(sigma, device=input_ids.device, dtype=torch.float32)
-        sigma_cond = self.timestep_embedder(sigma)
+        c_noise = 0.25 * torch.log(sigma)
+        sigma_cond = self.timestep_embedder(c_noise)
         x = self.embeddings(input_ids)
 
         new_caches = []
@@ -377,56 +383,67 @@ class DofiLLM(nn.Module):
 
     @torch.no_grad()
     def ode_solve(self, input_ids, num_steps=4, sigma_min=0.002, sigma_max=80.0):
-        """ODE para noise_on_labels: denoising iterativo del embedding del siguiente token.
+        """ODE para noise_on_labels: denoising iterativo con EDM parameterization.
 
-        Cada paso corre UN bloque (4 capas), total = 4 bloques = 16 capas = 1 forward completo.
+        Cada paso corre UN bloque (4 capas), total = 4 bloques = 16 capas.
         """
-        context = self.embeddings(input_ids)  # (B, L, D) embeds limpios del contexto
+        context = self.embeddings(input_ids)  # (B, L, D)
         B, L, D = context.shape
+        sigma_data = self.config.sigma_data
 
         sigmas = get_discrete_sigmas(num_steps, sigma_min, sigma_max, dblock=True)
         sigmas = sigmas.to(input_ids.device)
 
-        # zt = embedding ruidoso del siguiente token (random)
         zt = torch.randn(B, 1, D, device=input_ids.device, dtype=context.dtype) * sigmas[0]
 
         for i in range(len(sigmas) - 1):
             sigma = sigmas[i]
             next_sigma = sigmas[i + 1]
-
-            # Cada paso usa UN bloque
             block_idx = min(i, self.config.num_blocks - 1)
 
-            # Concatenar contexto + embedding ruidoso
-            x = torch.cat([context, zt], dim=1)
+            # EDM parameterization
+            c_skip = sigma_data**2 / (sigma**2 + sigma_data**2)
+            c_out = sigma * sigma_data / (sigma**2 + sigma_data**2)**0.5
+            c_in = 1.0 / (sigma**2 + sigma_data**2)**0.5
+            c_noise = 0.25 * torch.log(sigma)
 
-            # Forward solo por las capas de este bloque
-            sc = self.timestep_embedder(sigma)
+            # Forward: context + zt escalado por c_in
+            x = torch.cat([context, zt * c_in], dim=1)
+            sc = self.timestep_embedder(c_noise)
             k_prev = None
             for j in self.get_block_layers(block_idx):
                 x, kv = self.blocks[j](x, sc, k_shared=k_prev)
                 k_prev = kv
 
-            # Logits de la posición del target (última)
-            logits = self.lm_head(x[:, -1:, :])
+            # EDM output en la posición del target (última)
+            model_out = x[:, -1:, :] * c_out + zt * c_skip
+            logits = self.lm_head(model_out)
 
-            # Convertir logits a embedding space
+            # Convertir a embedding para Euler step
             probs = F.softmax(logits / 0.7, dim=-1)
             denoised = probs @ self.embeddings.weight
 
-            # Euler step: dx/dσ = (x - denoised) / σ
+            # Euler step
             d = (zt - denoised) / sigma
             dt = next_sigma - sigma
             zt = zt + dt * d
 
-        # Forward final por TODOS los bloques para logits limpios
-        x = torch.cat([context, zt], dim=1)
-        sc = self.timestep_embedder(sigmas[-1])
+        # Forward final por TODOS los bloques con EDM
+        sigma = sigmas[-1]
+        c_skip = sigma_data**2 / (sigma**2 + sigma_data**2)
+        c_out = sigma * sigma_data / (sigma**2 + sigma_data**2)**0.5
+        c_in = 1.0 / (sigma**2 + sigma_data**2)**0.5
+        c_noise = 0.25 * torch.log(sigma)
+
+        x = torch.cat([context, zt * c_in], dim=1)
+        sc = self.timestep_embedder(c_noise)
         k_prev = None
         for block in self.blocks:
             x, kv = block(x, sc, k_shared=k_prev)
             k_prev = kv
-        return self.lm_head(x[:, -1:, :])
+        model_out = x[:, -1:, :] * c_out + zt * c_skip
+        logits = self.lm_head(model_out)
+        return logits
 
     @torch.no_grad()
     def generate(self, input_ids, max_new_tokens=100, temperature=0.8, top_k=40,
