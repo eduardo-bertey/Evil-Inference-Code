@@ -50,7 +50,7 @@ class Config:
 
     # Sequential blocks: True = pasar por bloques en orden 0,1,2,3,0,1...
     # False = elegir bloque al azar (default DiffusionBlocks)
-    sequential_blocks = True  # True = orden 0,1,2,3,0,1... False = random
+    sequential_blocks = True  # True = 4 bloques por step (simula multi-device), False = random
 
     # Training
     batch_size = 8
@@ -318,21 +318,22 @@ class DofiLLM(nn.Module):
 
         # EDM parameterization
         c_in = 1.0 / (sigma_val**2 + sigma_data**2)**0.5
+        c_out = sigma_val * sigma_data / (sigma_val**2 + sigma_data**2)**0.5
+        c_skip = sigma_data**2 / (sigma_val**2 + sigma_data**2)
         c_noise = 0.25 * math.log(max(sigma_val, 1e-8))
         sigma_cond = self.timestep_embedder(torch.tensor(c_noise, device=input_ids.device, dtype=torch.float32))
 
         x = self.normalize_embeddings(self.embeddings(input_ids))
 
         if self.config.noise_on_labels and target_ids is not None:
-            # DiffusionBlocks: ruido en LABEL embeddings
+            # DiffusionBlocks: noisy label embeddings concatenados al input
             z = self.normalize_embeddings(self.embeddings(target_ids))
             if sigma_val > 0:
                 zt = z + torch.randn_like(z) * sigma_val
             else:
                 zt = z
-            x = x + zt * c_in
+            x = torch.cat([zt * c_in, x], dim=1)
         else:
-            # Original: ruido en INPUT embeddings
             if sigma_val > 0:
                 x = x + torch.randn_like(x) * sigma_val * c_in
 
@@ -342,8 +343,14 @@ class DofiLLM(nn.Module):
             x, kv = self.blocks[i](x, sigma_cond, k_shared=k_prev)
             k_prev = kv
 
+        # EDM output: solo las posiciones del target
         x = self.norm_f(x)
-        logits = self.lm_head(x)
+        if self.config.noise_on_labels and target_ids is not None:
+            target_out = x[:, :target_ids.shape[1], :]
+            model_out = target_out * c_out + zt * c_skip
+            logits = self.lm_head(model_out)
+        else:
+            logits = self.lm_head(x)
         return logits
 
     def forward(self, input_ids, sigma=None, block_idx=None):
@@ -415,16 +422,16 @@ class DofiLLM(nn.Module):
             c_in = 1.0 / (sigma**2 + sigma_data**2)**0.5
             c_noise = 0.25 * torch.log(sigma)
 
-            # Forward: context + zt escalado por c_in
-            x = torch.cat([context, zt * c_in], dim=1)
+            # Forward: zt primero (como CLS en DiffusionBlocks) + context
+            x = torch.cat([zt * c_in, context], dim=1)
             sc = self.timestep_embedder(c_noise)
             k_prev = None
             for j in self.get_block_layers(block_idx):
                 x, kv = self.blocks[j](x, sc, k_shared=k_prev)
                 k_prev = kv
 
-            # EDM output en la posición del target (última)
-            model_out = x[:, -1:, :] * c_out + zt * c_skip
+            # EDM output en la posición del target (primera, zt va primero)
+            model_out = x[:, :1, :] * c_out + zt * c_skip
             logits = self.lm_head(model_out)
 
             # Convertir a embedding para Euler step
@@ -443,13 +450,13 @@ class DofiLLM(nn.Module):
         c_in = 1.0 / (sigma**2 + sigma_data**2)**0.5
         c_noise = 0.25 * torch.log(sigma)
 
-        x = torch.cat([context, zt * c_in], dim=1)
+        x = torch.cat([zt * c_in, context], dim=1)
         sc = self.timestep_embedder(c_noise)
         k_prev = None
         for block in self.blocks:
             x, kv = block(x, sc, k_shared=k_prev)
             k_prev = kv
-        model_out = x[:, -1:, :] * c_out + zt * c_skip
+        model_out = x[:, :zt.shape[1], :] * c_out + zt * c_skip
         logits = self.lm_head(model_out)
         return logits
 
