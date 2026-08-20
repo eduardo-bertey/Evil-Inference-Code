@@ -326,13 +326,13 @@ class DofiLLM(nn.Module):
         x = self.normalize_embeddings(self.embeddings(input_ids))
 
         if self.config.noise_on_labels and target_ids is not None:
-            # DiffusionBlocks: noisy label embeddings concat al input
+            # Paper AR: noise en TODOS los embeddings, causal mask
             z = self.normalize_embeddings(self.embeddings(target_ids))
             if sigma_val > 0:
                 zt = z + torch.randn_like(z) * sigma_val
             else:
                 zt = z
-            x = torch.cat([zt * c_in, x], dim=1)
+            x = x + zt * c_in
         else:
             if sigma_val > 0:
                 x = x + torch.randn_like(x) * sigma_val * c_in
@@ -343,11 +343,10 @@ class DofiLLM(nn.Module):
             x, kv = self.blocks[i](x, sigma_cond, k_shared=k_prev)
             k_prev = kv
 
-        # EDM output: posiciones del target (primeras, zt va primero)
+        # EDM output
         x = self.norm_f(x)
         if self.config.noise_on_labels and target_ids is not None:
-            target_out = x[:, :target_ids.shape[1], :]
-            model_out = target_out * c_out + zt * c_skip
+            model_out = x * c_out + zt * c_skip
             logits = self.lm_head(model_out)
         else:
             logits = self.lm_head(x)
