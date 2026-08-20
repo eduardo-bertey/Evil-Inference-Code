@@ -261,7 +261,6 @@ def main():
     t0 = time.time()
     last_rpt_time = t0
     last_rpt_step = 0
-    seq_block_counter = 0
 
     while True:
         if test_mode:
@@ -281,45 +280,40 @@ def main():
                 break
             batch_end = min(batch_start + config.batch_size, n_seq)
 
-            # 1. Eleg bloque
-            if config.sequential_blocks:
-                dblock_idx = seq_block_counter % config.num_blocks
-                seq_block_counter += 1
-            else:
-                dblock_idx = random.randint(0, config.num_blocks - 1)
-
-            # 2. Muestrear σ del rango del bloque
-            sigma_np = sample_sigma_in_block(dblock_idx, block_sigmas, gamma=config.gamma)
-            sigma = torch.tensor(sigma_np, device=device)
-
-            # 3. Preparar batch
-            x_list, y_list = [], []
-            for i in range(batch_start, batch_end):
-                idx = i * seq_len
-                x = torch.tensor(tokens[idx:idx + seq_len], dtype=torch.long, device=device).unsqueeze(0)
-                y = torch.tensor(tokens[idx + 1:idx + seq_len + 1], dtype=torch.long, device=device).unsqueeze(0)
-                x_list.append(x)
-                y_list.append(y)
-            input_ids = torch.cat(x_list, dim=0)
-            target_ids = torch.cat(y_list, dim=0)
-
-            # 4. Forward por el bloque
             if config.sequential_blocks:
                 total_loss = 0.0
                 for b in range(config.num_blocks):
-                    sigma_np = sample_sigma_in_block(b, block_sigmas, gamma=config.gamma)
-                    sigma = torch.tensor(sigma_np, device=device)
-                    logits = model.forward_block(b, input_ids, sigma, target_ids=target_ids)
-                    loss_b = F.cross_entropy(logits.view(-1, config.emb_num), target_ids.view(-1))
-                    w = float(edm_weight(sigma_np, config.sigma_data))
-                    total_loss = total_loss + loss_b * w
+                    sigma_np_b = sample_sigma_in_block(b, block_sigmas, gamma=config.gamma)
+                    sigma_b = torch.tensor(sigma_np_b, device=device)
+                    logits = model.forward_block(b, input_ids, sigma_b, target_ids=target_ids)
+                    loss_b = F.cross_entropy(
+                        logits.view(-1, config.emb_num),
+                        target_ids.view(-1),
+                    )
+                    w_b = float(edm_weight(sigma_np_b, config.sigma_data))
+                    total_loss = total_loss + loss_b * w_b
                     del logits
                 loss = total_loss / config.num_blocks
+                loss_val = loss.item()
             else:
+                # 1. Eleg bloque al azar
+                dblock_idx = random.randint(0, config.num_blocks - 1)
+
+                # 2. Muestrear σ del rango del bloque
+                sigma_np = sample_sigma_in_block(dblock_idx, block_sigmas, gamma=config.gamma)
+                sigma = torch.tensor(sigma_np, device=device)
+
+                # 4. Forward por el bloque
                 logits = model.forward_block(dblock_idx, input_ids, sigma, target_ids=target_ids)
-                loss = F.cross_entropy(logits.view(-1, config.emb_num), target_ids.view(-1))
+
+                # 5. Loss: weighted cross-entropy
+                loss = F.cross_entropy(
+                    logits.view(-1, config.emb_num),
+                    target_ids.view(-1),
+                )
                 w = float(edm_weight(sigma_np, config.sigma_data))
                 loss = loss * w
+                loss_val = loss.item()
 
             # 6. Backward
             (loss / config.grad_acc).backward()
