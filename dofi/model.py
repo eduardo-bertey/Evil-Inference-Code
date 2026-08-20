@@ -357,6 +357,8 @@ class DofiLLM(nn.Module):
 
     def forward_with_cache(self, input_ids, offset, caches, sigma):
         """Forward con KV cache para inference."""
+        if not isinstance(sigma, torch.Tensor):
+            sigma = torch.tensor(sigma, device=input_ids.device, dtype=torch.float32)
         sigma_cond = self.timestep_embedder(sigma)
         x = self.embeddings(input_ids)
 
