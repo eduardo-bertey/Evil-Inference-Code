@@ -261,6 +261,7 @@ def main():
     t0 = time.time()
     last_rpt_time = t0
     last_rpt_step = 0
+    seq_block_counter = 0
 
     while True:
         if test_mode:
@@ -280,8 +281,12 @@ def main():
                 break
             batch_end = min(batch_start + config.batch_size, n_seq)
 
-            # 1. Eleg bloque al azar
-            dblock_idx = random.randint(0, config.num_blocks - 1)
+            # 1. Eleg bloque
+            if config.sequential_blocks:
+                dblock_idx = seq_block_counter % config.num_blocks
+                seq_block_counter += 1
+            else:
+                dblock_idx = random.randint(0, config.num_blocks - 1)
 
             # 2. Muestrear σ del rango del bloque
             sigma_np = sample_sigma_in_block(dblock_idx, block_sigmas, gamma=config.gamma)

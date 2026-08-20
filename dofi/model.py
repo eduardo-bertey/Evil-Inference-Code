@@ -48,6 +48,10 @@ class Config:
     # DiffusionBlocks: noise on labels (True) or input (False)
     noise_on_labels = True  # True = como DiffusionBlocks original (necesita retrain)
 
+    # Sequential blocks: True = pasar por bloques en orden 0,1,2,3,0,1...
+    # False = elegir bloque al azar (default DiffusionBlocks)
+    sequential_blocks = True  # True = orden 0,1,2,3,0,1... False = random
+
     # Training
     batch_size = 8
     grad_acc = 1
