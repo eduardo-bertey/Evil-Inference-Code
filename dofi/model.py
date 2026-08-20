@@ -401,14 +401,14 @@ class DofiLLM(nn.Module):
             c_in = 1.0 / (sigma**2 + sigma_data**2)**0.5
             c_noise = 0.25 * torch.log(sigma)
 
-            # Forward: zt primero (como CLS en DiffusionBlocks) + context
-            x = torch.cat([zt * c_in, context], dim=1)
+            # Forward: context primero, zt al final (causal mask necesita zt al final)
+            x = torch.cat([context, zt * c_in], dim=1)
             sc = self.timestep_embedder(c_noise)
             for j in self.get_block_layers(block_idx):
                 x = self.blocks[j](x, sc)
 
-            # EDM output en la posición del target (primera, zt va primero)
-            model_out = x[:, :1, :] * c_out + zt * c_skip
+            # EDM output en la última posición (zt)
+            model_out = x[:, -1:, :] * c_out + zt * c_skip
             logits = self.lm_head(model_out)
 
             # Convertir a embedding para Euler step
@@ -427,11 +427,11 @@ class DofiLLM(nn.Module):
         c_in = 1.0 / (sigma**2 + sigma_data**2)**0.5
         c_noise = 0.25 * torch.log(sigma)
 
-        x = torch.cat([zt * c_in, context], dim=1)
+        x = torch.cat([context, zt * c_in], dim=1)
         sc = self.timestep_embedder(c_noise)
         for block in self.blocks:
             x = block(x, sc)
-        model_out = x[:, :zt.shape[1], :] * c_out + zt * c_skip
+        model_out = x[:, -1:, :] * c_out + zt * c_skip
         logits = self.lm_head(model_out)
         return logits
 
