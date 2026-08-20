@@ -36,7 +36,7 @@ class Config:
     sigma_max = 80.0
     p_mean = -1.2
     p_std = 1.2
-    gamma = 0.05  # overlap entre bloques
+    gamma = 0.1  # overlap entre bloques (paper usa 0.1 para text)
     sigma_data = 0.5
 
     # Capas pares comparten K
