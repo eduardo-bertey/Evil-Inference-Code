@@ -59,7 +59,7 @@ def sample_sigma_in_block(block_idx, block_sigmas, gamma=0.05):
     cdf_max = norm.cdf((log_max - (-1.2)) / 1.2)
     u = np.random.uniform(max(cdf_min, 0.0), min(cdf_max, 1.0))
     log_sigma = -1.2 + 1.2 * norm.ppf(u)
-    return max(np.exp(log_sigma), 0.05).astype(np.float32)
+    return float(max(np.exp(log_sigma), 0.05))
 
 
 def edm_weight(sigma, sigma_data=0.5):
