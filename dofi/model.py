@@ -326,7 +326,7 @@ class DofiLLM(nn.Module):
         x = self.normalize_embeddings(self.embeddings(input_ids))
 
         if self.config.noise_on_labels and target_ids is not None:
-            # DiffusionBlocks: noisy label embeddings sumados al input
+            # DiffusionBlocks: noisy label embeddings concat al input
             z = self.normalize_embeddings(self.embeddings(target_ids))
             if sigma_val > 0:
                 zt = z + torch.randn_like(z) * sigma_val
