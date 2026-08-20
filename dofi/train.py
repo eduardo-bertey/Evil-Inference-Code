@@ -292,21 +292,22 @@ def main():
             target_ids = torch.cat(y_list, dim=0)
 
             if config.sequential_blocks:
-                # 4 bloques en orden, loss promedio
-                total_loss = 0.0
+                # 4 bloques en orden, backward por cada uno
                 for b in range(config.num_blocks):
-                    sigma_np_b = sample_sigma_in_block(b, block_sigmas, gamma=config.gamma)
-                    sigma_b = torch.tensor(sigma_np_b, device=device)
-                    logits = model.forward_block(b, input_ids, sigma_b, target_ids=target_ids)
-                    loss_b = F.cross_entropy(
+                    sigma_np = sample_sigma_in_block(b, block_sigmas, gamma=config.gamma)
+                    sigma = torch.tensor(sigma_np, device=device)
+                    logits = model.forward_block(b, input_ids, sigma, target_ids=target_ids)
+                    loss = F.cross_entropy(
                         logits.view(-1, config.emb_num),
                         target_ids.view(-1),
                     )
-                    w_b = float(edm_weight(sigma_np_b, config.sigma_data))
-                    total_loss = total_loss + loss_b * w_b
-                    del logits
-                loss = total_loss / config.num_blocks
-                loss_val = loss.item()
+                    w = float(edm_weight(sigma_np, config.sigma_data))
+                    loss = loss * w
+                    (loss / (config.grad_acc * config.num_blocks)).backward()
+                    loss_val = loss.item()
+                    del logits, loss
+                dblock_idx = seq_block_counter % config.num_blocks
+                seq_block_counter += 1
             else:
                 # 1. Eleg bloque al azar
                 dblock_idx = random.randint(0, config.num_blocks - 1)
@@ -328,8 +329,9 @@ def main():
                 loss_val = loss.item()
 
             # 6. Backward
-            (loss / config.grad_acc).backward()
-            del loss
+            if not config.sequential_blocks:
+                (loss / config.grad_acc).backward()
+                del loss
 
             if (batch_start // config.batch_size + 1) % config.grad_acc == 0 or batch_end >= n_seq:
                 grad_norm = float(torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0))
