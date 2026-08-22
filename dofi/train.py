@@ -94,8 +94,7 @@ plot_interval = 256
 def generate_sample(model, tokenizer, device, prompt="hola", max_new=50):
     model.eval()
     x = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
-    out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40,
-                         sigma=0.002, use_ode=False)
+    out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40)
     model.train()
     return tokenizer.decode(out[0].tolist())
 
@@ -294,19 +293,24 @@ def main():
 
             if config.sequential_blocks:
                 # 4 bloques en orden, backward por cada uno
+                total_loss = 0.0
                 for b in range(config.num_blocks):
                     sigma_np = sample_sigma_in_block(b, block_sigmas, gamma=config.gamma)
                     sigma = torch.tensor(sigma_np, device=device)
-                    logits = model.forward_block(b, input_ids, sigma, target_ids=target_ids)
-                    loss = F.cross_entropy(
+                    logits, noise_mask = model.forward_block(b, input_ids, sigma, target_ids=target_ids)
+                    loss_b = F.cross_entropy(
                         logits.view(-1, config.emb_num),
                         target_ids.view(-1),
+                        reduction='none',
                     )
+                    loss_b = loss_b.view_as(target_ids)
+                    mask = noise_mask.bool().expand_as(loss_b)
+                    loss_b = (loss_b * mask).sum() / mask.sum().clamp(min=1)
                     w = float(edm_weight(sigma_np, config.sigma_data))
-                    loss = loss * w
-                    (loss / (config.grad_acc * config.num_blocks)).backward()
-                    loss_val = loss.item()
-                    del logits, loss
+                    total_loss = total_loss + loss_b * w
+                    (loss_b * w / (config.grad_acc * config.num_blocks)).backward()
+                    del logits, noise_mask
+                loss_val = total_loss.item()
                 dblock_idx = seq_block_counter % config.num_blocks
                 seq_block_counter += 1
             else:
@@ -318,13 +322,17 @@ def main():
                 sigma = torch.tensor(sigma_np, device=device)
 
                 # 4. Forward por el bloque
-                logits = model.forward_block(dblock_idx, input_ids, sigma, target_ids=target_ids)
+                logits, noise_mask = model.forward_block(dblock_idx, input_ids, sigma, target_ids=target_ids)
 
-                # 5. Loss: weighted cross-entropy
+                # 5. Loss: weighted cross-entropy (solo en posiciones noised)
                 loss = F.cross_entropy(
                     logits.view(-1, config.emb_num),
                     target_ids.view(-1),
+                    reduction='none',
                 )
+                loss = loss.view_as(target_ids)
+                mask = noise_mask.bool().expand_as(loss)
+                loss = (loss * mask).sum() / mask.sum().clamp(min=1)
                 w = float(edm_weight(sigma_np, config.sigma_data))
                 loss = loss * w
                 loss_val = loss.item()
