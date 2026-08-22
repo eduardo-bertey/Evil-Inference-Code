@@ -308,14 +308,14 @@ class DofiLLM(nn.Module):
             # Concat: [clean, noised * c_in]
             x = torch.cat([original, noised * c_in], dim=1)
 
-            # Masks
+            # Masks (ambos del largo total L+N)
             L = original.shape[1]
             N = noised.shape[1]
-            original_mask = torch.ones(input_ids.shape[0], L, device=input_ids.device)
-            noise_mask = torch.cat([
-                torch.zeros(input_ids.shape[0], L, device=input_ids.device),
-                torch.ones(input_ids.shape[0], N, device=input_ids.device),
-            ], dim=1)
+            total = L + N
+            original_mask = torch.zeros(input_ids.shape[0], total, device=input_ids.device)
+            original_mask[:, :L] = 1.0
+            noise_mask = torch.zeros(input_ids.shape[0], total, device=input_ids.device)
+            noise_mask[:, L:] = 1.0
 
             # Noise tensor for EDM output (zeros for clean, actual noise for noised)
             noise_full = torch.cat([
