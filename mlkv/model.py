@@ -37,7 +37,7 @@ class Config:
     # MLKV: cantidad de grupos que tienen K/V propias (capas/grupo = layers/num_kv_layers)
     num_kv_layers = 6
 
-    batch_size: int = 6
+    batch_size: int = 10
     grad_acc: int = 6
     learning_rate: float = 3e-4
     weight_decay: float = 0.1
