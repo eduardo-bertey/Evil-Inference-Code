@@ -23,7 +23,7 @@ class Config:
     num_blocks = 4
     layers_per_block = 4
     ffn_dim = 2048
-    block_size = 2048
+    block_size = 1024
     emb_num = 32000
     drop = 0.0
 
