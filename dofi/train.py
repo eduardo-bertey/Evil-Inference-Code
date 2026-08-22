@@ -310,7 +310,7 @@ def main():
                     total_loss = total_loss + loss_b.item() * w
                     (loss_b * w / (config.grad_acc * config.num_blocks)).backward()
                     del logits, noise_mask
-                loss_val = total_loss.item()
+                loss_val = total_loss
                 dblock_idx = seq_block_counter % config.num_blocks
                 seq_block_counter += 1
             else:
