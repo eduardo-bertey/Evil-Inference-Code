@@ -240,7 +240,7 @@ class DofiLLM(nn.Module):
         self.config = config
 
         self.wte = nn.Embedding(config.emb_num, config.dim)
-        self.wpe = nn.Embedding(config.block_size, config.dim)
+        self.wpe = nn.Embedding(config.block_size + 1, config.dim)
 
         self.blocks = nn.ModuleList([Block(config) for _ in range(config.layers)])
 

@@ -298,16 +298,16 @@ def main():
                     sigma_np = sample_sigma_in_block(b, block_sigmas, gamma=config.gamma)
                     sigma = torch.tensor(sigma_np, device=device)
                     logits, noise_mask = model.forward_block(b, input_ids, sigma, target_ids=target_ids)
+                    L = input_ids.shape[1]
+                    noised_logits = logits[:, L:]
                     loss_b = F.cross_entropy(
-                        logits.view(-1, config.emb_num),
-                        target_ids.view(-1),
+                        noised_logits.reshape(-1, config.emb_num),
+                        target_ids.reshape(-1),
                         reduction='none',
                     )
-                    loss_b = loss_b.view_as(target_ids)
-                    mask = noise_mask.bool().expand_as(loss_b)
-                    loss_b = (loss_b * mask).sum() / mask.sum().clamp(min=1)
+                    loss_b = loss_b.mean()
                     w = float(edm_weight(sigma_np, config.sigma_data))
-                    total_loss = total_loss + loss_b * w
+                    total_loss = total_loss + loss_b.item() * w
                     (loss_b * w / (config.grad_acc * config.num_blocks)).backward()
                     del logits, noise_mask
                 loss_val = total_loss.item()
@@ -323,16 +323,14 @@ def main():
 
                 # 4. Forward por el bloque
                 logits, noise_mask = model.forward_block(dblock_idx, input_ids, sigma, target_ids=target_ids)
-
-                # 5. Loss: weighted cross-entropy (solo en posiciones noised)
+                L = input_ids.shape[1]
+                noised_logits = logits[:, L:]
                 loss = F.cross_entropy(
-                    logits.view(-1, config.emb_num),
-                    target_ids.view(-1),
+                    noised_logits.reshape(-1, config.emb_num),
+                    target_ids.reshape(-1),
                     reduction='none',
                 )
-                loss = loss.view_as(target_ids)
-                mask = noise_mask.bool().expand_as(loss)
-                loss = (loss * mask).sum() / mask.sum().clamp(min=1)
+                loss = loss.mean()
                 w = float(edm_weight(sigma_np, config.sigma_data))
                 loss = loss * w
                 loss_val = loss.item()
