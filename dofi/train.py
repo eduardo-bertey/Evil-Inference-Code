@@ -175,6 +175,7 @@ def main():
         lr=config.learning_rate,
         weight_decay=config.weight_decay,
         betas=config.betas,
+        fused=True,
     )
 
     # Sigma scheduling

@@ -156,13 +156,9 @@ class Attention(nn.Module):
         for i in range(B):
             masks.append(self._derive_mask(original_mask[i], noise_mask[i]))
         masks = torch.stack(masks, dim=0)
-        masks = masks[:, None, :, :].to(dtype=q.dtype)
+        masks = masks[:, None, :, :]
 
-        w = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        w = w * masks - 1e20 * (1 - masks)
-        w = F.softmax(w, dim=-1)
-
-        y = torch.matmul(w, v)
+        y = F.scaled_dot_product_attention(q, k, v, attn_mask=masks)
         y = self._xsa(y, v)
         y = y.transpose(1, 2).contiguous().view(B, T, -1)
 
