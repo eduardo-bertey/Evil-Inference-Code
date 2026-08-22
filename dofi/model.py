@@ -42,7 +42,7 @@ class Config:
     sequential_blocks = True
 
     # Training
-    batch_size = 8
+    batch_size = 4
     grad_acc = 1
     learning_rate = 3e-4
     weight_decay = 0.1
