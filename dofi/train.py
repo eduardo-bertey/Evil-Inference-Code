@@ -249,7 +249,7 @@ def main():
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    emb_p = model.embeddings.weight.numel()
+    emb_p = model.wte.weight.numel()
     layer_p = sum(p.numel() for b in model.blocks for p in b.parameters())
     print(f"Params: emb={emb_p:,} + {config.layers}capas={layer_p:,} = {emb_p + layer_p:,}")
     print(f"dim={config.dim} lay={config.layers} heads={config.heads} kv={config.kv_groups} "
