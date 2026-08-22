@@ -18,7 +18,7 @@ from dblock_modules import get_discrete_sigmas
 class Config:
     dim = 512
     heads = 8
-    kv_groups = 8
+    kv_groups = 4
     layers = 16
     num_blocks = 4
     layers_per_block = 4
@@ -94,6 +94,12 @@ class AdaLN(nn.Module):
         return self.net(x)
 
 
+def repeat_kv(x, num_heads, num_kv_groups):
+    if num_kv_groups == num_heads:
+        return x
+    return x.repeat_interleave(num_heads // num_kv_groups, dim=2)
+
+
 class Attention(nn.Module):
     """QKV attention + XSA con mask custom."""
 
@@ -101,12 +107,12 @@ class Attention(nn.Module):
         super().__init__()
         nx = config.dim
         self.n_head = config.heads
-        self.n_state = nx
-        self.split_size = nx
+        self.n_kv_groups = config.kv_groups
+        self.head_dim = nx // self.n_head
 
         self.q_proj = nn.Linear(nx, nx, bias=False)
-        self.k_proj = nn.Linear(nx, nx, bias=False)
-        self.v_proj = nn.Linear(nx, nx, bias=False)
+        self.k_proj = nn.Linear(nx, config.kv_groups * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(nx, config.kv_groups * self.head_dim, bias=False)
         self.o_proj = nn.Linear(nx, nx, bias=False)
 
     @staticmethod
@@ -140,9 +146,11 @@ class Attention(nn.Module):
     def forward(self, x, original_mask, noise_mask):
         B, T, D = x.shape
 
-        q = self.q_proj(x).view(B, T, self.n_head, D // self.n_head).transpose(1, 2)
-        k = self.k_proj(x).view(B, T, self.n_head, D // self.n_head).transpose(1, 2)
-        v = self.v_proj(x).view(B, T, self.n_head, D // self.n_head).transpose(1, 2)
+        q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.n_kv_groups, self.head_dim)
+        v = self.v_proj(x).view(B, T, self.n_kv_groups, self.head_dim)
+        k = repeat_kv(k, self.n_head, self.n_kv_groups).transpose(1, 2)
+        v = repeat_kv(v, self.n_head, self.n_kv_groups).transpose(1, 2)
 
         masks = []
         for i in range(B):
@@ -150,7 +158,7 @@ class Attention(nn.Module):
         masks = torch.stack(masks, dim=0)
         masks = masks[:, None, :, :].to(dtype=q.dtype)
 
-        w = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(D // self.n_head)
+        w = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         w = w * masks - 1e20 * (1 - masks)
         w = F.softmax(w, dim=-1)
 
@@ -164,9 +172,11 @@ class Attention(nn.Module):
         """Inference: causal mask normal."""
         B, T, D = x.shape
 
-        q = self.q_proj(x).view(B, T, self.n_head, D // self.n_head).transpose(1, 2)
-        k = self.k_proj(x).view(B, T, self.n_head, D // self.n_head).transpose(1, 2)
-        v = self.v_proj(x).view(B, T, self.n_head, D // self.n_head).transpose(1, 2)
+        q = self.q_proj(x).view(B, T, self.n_head, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.n_kv_groups, self.head_dim)
+        v = self.v_proj(x).view(B, T, self.n_kv_groups, self.head_dim)
+        k = repeat_kv(k, self.n_head, self.n_kv_groups).transpose(1, 2)
+        v = repeat_kv(v, self.n_head, self.n_kv_groups).transpose(1, 2)
 
         y = F.scaled_dot_product_attention(q, k, v, is_causal=True)
         y = self._xsa(y, v)
