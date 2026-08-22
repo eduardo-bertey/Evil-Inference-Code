@@ -346,5 +346,6 @@ class LLM(nn.Module):
 
 def kv_cache_bytes(config, seq_len, dtype=2):
     """Bytes del KV cache para seq_len tokens."""
-    per_entry = 2 * config.kv_groups * config.head_dim * seq_len * dtype  # k+v
+    head_dim = config.dim // config.heads
+    per_entry = 2 * config.kv_groups * head_dim * seq_len * dtype  # k+v
     return per_entry * config.num_kv_layers
