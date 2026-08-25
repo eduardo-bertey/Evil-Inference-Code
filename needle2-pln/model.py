@@ -412,9 +412,26 @@ class LLM(nn.Module):
         ngram_ok = torch.stack(
             [mask_diag(mask, o - 1) for o in orders for _ in range(heads)], dim=-1)
         tap_ok = torch.stack(
-            [mask_diag(mask, j * max(orders)) for j in range(ENGRAM_CONV_TAPS)], dim=-1)
+            [mask_diag(mask, j * max(orders)) for j in range(ENGRAM_CONV_TAPS)], dim=0)
         pairs = [e(indices, ngram_ok, tap_ok) for e in self.engrams]
         return torch.stack([k for k, _ in pairs]), torch.stack([v for _, v in pairs])
+
+    def _hc_step(self, l, xf, block_call):
+        """Una capa de hyper-conexiones multi-lane (compartida train/inferencia)."""
+        cfg = self.config
+        n = cfg.mhc_lanes
+        nx = rms_unit(xf.reshape(*xf.shape[:2], n * cfg.dim))
+        hpre = torch.sigmoid(nx @ self.phi_pre[l].float()
+                             + self.b_pre[l].float() + self.pre_off[l].float())
+        u = torch.einsum("btn,btnc->btc", hpre, xf).to(xf.dtype)
+        y = block_call(u) - u
+        hpost = 2 * torch.sigmoid(nx @ self.phi_post[l].float()
+                                  + self.b_post[l].float() + self.post_off[l].float())
+        res = (nx @ self.phi_res[l].float()).reshape(*xf.shape[:2], n, n)
+        hres = sinkhorn(self.a_res[l] * res + self.b_res[l].float())
+        new_x = torch.einsum("btij,btjc->btic", hres, xf) \
+            + hpost[..., None] * y.float()[:, :, None, :]
+        return new_x.to(xf.dtype)
 
     def _stack(self, x, mask, engram_kv):
         """Hyper-conexiones multi-lane: mezcla 4 streams residuales por capa."""
@@ -422,21 +439,14 @@ class LLM(nn.Module):
         L, n = cfg.layers, cfg.mhc_lanes
         xf = x.unsqueeze(2).float().expand(*x.shape[:2], n, x.shape[-1]).contiguous()
         for l in range(L):
-            nx = rms_unit(xf.reshape(*xf.shape[:2], n * cfg.dim))
-            hpre = torch.sigmoid(nx @ self.phi_pre[l].float()
-                                 + self.b_pre[l].float() + self.pre_off[l].float())
-            u = torch.einsum("btn,btnc->btc", hpre, xf).to(x.dtype)
             site_flag = self.site_flags[l] if engram_kv is not None else None
             ekv = engram_kv if (site_flag is not None and site_flag.sum() > 0) else None
-            y = self.blocks[l](u, mask, engram_kv=ekv, site_flag=site_flag if ekv is not None else None)
-            y = y - u
-            hpost = 2 * torch.sigmoid(nx @ self.phi_post[l].float()
-                                      + self.b_post[l].float() + self.post_off[l].float())
-            res = (nx @ self.phi_res[l].float()).reshape(*xf.shape[:2], n, n)
-            hres = sinkhorn(self.a_res[l] * res + self.b_res[l].float())
-            new_x = torch.einsum("btij,btjc->btic", hres, xf) \
-                + hpost[..., None] * y.float()[:, :, None, :]
-            xf = new_x.to(x.dtype)
+
+            def block_call(u, l=l, ekv=ekv, sf=site_flag):
+                return self.blocks[l](u, mask, engram_kv=ekv,
+                                      site_flag=sf if ekv is not None else None)
+
+            xf = self._hc_step(l, xf, block_call)
         x = xf.mean(dim=2)
         return self.final_norm(x)
 
@@ -509,15 +519,24 @@ class LLM(nn.Module):
         if window and Tb > window:
             ek_full, ev_full = ek_full[:, :, -window:], ev_full[:, :, -window:]
 
+        xf = x.unsqueeze(2).float().expand(*x.shape[:2], cfg.mhc_lanes,
+                                           x.shape[-1]).contiguous()
         new_attn = []
         for l in range(cfg.layers):
             site_flag = self.site_flags[l]
             ekv = (ek_full, ev_full) if site_flag.sum() > 0 else None
-            x, kc = self.blocks[l].forward_with_cache(
-                x, offset, caches["attn"][l],
-                engram_kv=ekv, site_flag=site_flag, window=window)
-            new_attn.append(kc)
+
+            def block_call(u, l=l, ekv=ekv, sf=site_flag):
+                out, kc = self.blocks[l].forward_with_cache(
+                    u, offset, caches["attn"][l],
+                    engram_kv=ekv, site_flag=sf if ekv is not None else None,
+                    window=window)
+                new_attn.append(kc)
+                return out
+
+            xf = self._hc_step(l, xf, block_call)
         caches["attn"] = new_attn
+        x = self.final_norm(xf.mean(dim=2))
 
         logits = x @ self.embeddings.weight.T
         return logits, caches
