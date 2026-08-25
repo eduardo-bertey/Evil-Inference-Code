@@ -12,6 +12,7 @@ import math, inspect
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as _ckpt
 from rope import RoPE
 
 
@@ -466,6 +467,24 @@ class LLM(nn.Module):
         print(f"using fused AdamW: {use_fused}")
         return optimizer
 
+    def _ce_chunked(self, h, targets, chunk=2048):
+        """CE sin materializar logits completos: recompute por chunk en backward."""
+        emb_w = self.embeddings.weight
+        hf = h.reshape(-1, h.size(-1))
+        tf = targets.reshape(-1)
+        N = hf.shape[0]
+
+        def _chunk_loss(hc, tc):
+            logits_c = (hc @ emb_w.T).float()
+            return F.cross_entropy(logits_c, tc, reduction="sum")
+
+        total = None
+        for i in range(0, N, chunk):
+            lc = _ckpt(_chunk_loss, hf[i:i + chunk], tf[i:i + chunk],
+                       use_reentrant=False)
+            total = lc if total is None else total + lc
+        return total / max(N, 1)
+
     # ---------- entrenamiento ----------
 
     def forward(self, input_ids, labels=None):
@@ -476,11 +495,9 @@ class LLM(nn.Module):
         engram_kv = self._engram_kv(input_ids, mask)
         x = self._stack(x, mask, engram_kv)
 
-        emb_w = self.embeddings.weight
-        logits = x @ emb_w.T
         loss = None
         if labels is not None:
-            loss = F.cross_entropy(logits.reshape(-1, logits.size(-1)), labels.reshape(-1))
+            loss = self._ce_chunked(x, labels)
 
             nxt = torch.cat([input_ids[:, 1:],
                              torch.zeros(B, 1, dtype=input_ids.dtype, device=x.device)],
@@ -489,9 +506,9 @@ class LLM(nn.Module):
             m = self.mtp_combine(torch.cat([x, e2], dim=-1))
             m = self.mtp_block(m, mask)
             m = self.mtp_final_norm(m)
-            mtp_logits = m @ emb_w.T
-            loss = loss + F.cross_entropy(mtp_logits.reshape(-1, mtp_logits.size(-1)),
-                                          nxt.reshape(-1))
+            loss = loss + self._ce_chunked(m, nxt)
+
+        logits = x @ self.embeddings.weight.T if labels is None else None
         return logits, loss
 
     # ---------- inferencia (ventana deslizante KV) ----------
