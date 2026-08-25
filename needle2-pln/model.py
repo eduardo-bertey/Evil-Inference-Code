@@ -33,7 +33,7 @@ class Config:
     mhc_lanes = 4            # hyper-conexiones
     kv_window = 256          # ventana deslizante al inferir
 
-    batch_size: int = 8
+    batch_size: int = 6
     grad_acc: int = 4
     learning_rate: float = 3e-4
     weight_decay: float = 0.1
