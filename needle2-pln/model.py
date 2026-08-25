@@ -417,14 +417,14 @@ class LLM(nn.Module):
         pairs = [e(indices, ngram_ok, tap_ok) for e in self.engrams]
         return torch.stack([k for k, _ in pairs]), torch.stack([v for _, v in pairs])
 
-    def _hc_step(self, l, xf, block_call):
+    def _hc_step(self, l, xf, block_call, cdtype):
         """Una capa de hyper-conexiones multi-lane (compartida train/inferencia)."""
         cfg = self.config
         n = cfg.mhc_lanes
         nx = rms_unit(xf.reshape(*xf.shape[:2], n * cfg.dim))
         hpre = torch.sigmoid(nx @ self.phi_pre[l].float()
                              + self.b_pre[l].float() + self.pre_off[l].float())
-        u = torch.einsum("btn,btnc->btc", hpre, xf).to(xf.dtype)
+        u = torch.einsum("btn,btnc->btc", hpre, xf).to(cdtype)
         y = block_call(u) - u
         hpost = 2 * torch.sigmoid(nx @ self.phi_post[l].float()
                                   + self.b_post[l].float() + self.post_off[l].float())
@@ -438,6 +438,7 @@ class LLM(nn.Module):
         """Hyper-conexiones multi-lane: mezcla 4 streams residuales por capa."""
         cfg = self.config
         L, n = cfg.layers, cfg.mhc_lanes
+        cdtype = self.embeddings.weight.dtype
         xf = x.unsqueeze(2).float().expand(*x.shape[:2], n, x.shape[-1]).contiguous()
         for l in range(L):
             site_flag = self.site_flags[l] if engram_kv is not None else None
@@ -447,9 +448,9 @@ class LLM(nn.Module):
                 return self.blocks[l](u, mask, engram_kv=ekv,
                                       site_flag=sf if ekv is not None else None)
 
-            xf = self._hc_step(l, xf, block_call)
-        x = xf.mean(dim=2)
-        return self.final_norm(x)
+            xf = self._hc_step(l, xf, block_call, cdtype)
+        x = self.final_norm(xf.mean(dim=2)).to(cdtype)
+        return x
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
@@ -551,9 +552,9 @@ class LLM(nn.Module):
                 new_attn.append(kc)
                 return out
 
-            xf = self._hc_step(l, xf, block_call)
+            xf = self._hc_step(l, xf, block_call, self.embeddings.weight.dtype)
         caches["attn"] = new_attn
-        x = self.final_norm(xf.mean(dim=2))
+        x = self.final_norm(xf.mean(dim=2)).to(self.embeddings.weight.dtype)
 
         logits = x @ self.embeddings.weight.T
         return logits, caches
