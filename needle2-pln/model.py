@@ -149,8 +149,8 @@ class Engram(nn.Module):
             self.taps[0] = 1.0
 
     def forward(self, indices, ngram_ok, tap_ok):
-        ar = torch.arange(self.num_tables, device=indices.device)
-        fetched = self.tables[ar.view(-1, 1, 1), indices]           # (B,T,N,Dsub)
+        ar = torch.arange(self.num_tables, device=indices.device).view(1, 1, -1)
+        fetched = self.tables[ar, indices]                          # (B,T,N,Dsub)
         e = fetched.float() * ngram_ok[..., None].float()
         e = e.reshape(*indices.shape[:2], self.num_tables * self.sub_dim)
         e = e.to(self.key_proj.weight.dtype)
