@@ -215,6 +215,26 @@ def main():
             x = torch.cat(x_list, dim=0)
             y = torch.cat(y_list, dim=0)
 
+            # ------------------------------------------------------------------
+            # [PENDIENTE] Warmup de bp_steps (BPTT truncado) como HRM-Text.
+            # `compute_train_extra_args` (hrm_nocarry_bp_warmup.py) arranca en
+            # bp_min_steps y sube hasta bp_max_steps durante el warmup. Con el
+            # tiempo de entrenamiento crece la fidelidad del gradiente.
+            #
+            # Para activarlo:
+            #   1) en Config agregar:  bp_min_steps=1  bp_max_steps=min(h_cycles*l_cycles,6)  bp_warmup_ratio=0.01
+            #   2) en model._recur(self, z_H, z_L, bp_steps=None):
+            #        bp = bp_steps or getattr(cfg, "bp_steps", 2)
+            #   3) en model.forward(input_ids, labels=None, bp_steps=None):
+            #        z_H = self._recur(z_H, z_L, bp_steps=bp_steps)
+            #   4) aquí, por cada paso:
+            #
+            # warmup_steps = int(total_steps * config.bp_warmup_ratio)
+            # prog = min(1.0, step / warmup_steps) if warmup_steps > 0 else 1.0
+            # bp_steps = config.bp_min_steps + int(prog * (config.bp_max_steps - config.bp_min_steps))
+            # logits, loss = model(x, labels=y, bp_steps=bp_steps)
+            # ------------------------------------------------------------------
+
             logits, loss = model(x, labels=y)
             (loss / config.grad_acc).backward()
             loss_val = loss.item()

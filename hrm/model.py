@@ -42,7 +42,7 @@ class Config:
     # 10 pasadas con grad simultáneas revientan la T4; con esto cabe fácil.
     bp_steps = 2
 
-    batch_size: int = 6
+    batch_size: int = 8
     grad_acc: int = 6
     learning_rate: float = 3e-4
     weight_decay: float = 0.1
