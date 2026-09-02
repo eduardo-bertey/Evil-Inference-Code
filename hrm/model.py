@@ -37,6 +37,10 @@ class Config:
     layers = 4
     h_cycles = 2
     l_cycles = 4
+    # Retropropagación truncada (BPTT): solo las últimas `bp_steps` pasadas
+    # guardan gradiente. Las anteriores corren sin grafo (se libera VRAM).
+    # 10 pasadas con grad simultáneas revientan la T4; con esto cabe fácil.
+    bp_steps = 2
 
     batch_size: int = 6
     grad_acc: int = 6
@@ -239,10 +243,30 @@ class HRM(nn.Module):
         return optimizer
 
     def _recur(self, z_H, z_L):
-        for i in range(self.config.h_cycles):
-            for _k in range(self.config.l_cycles):
-                z_L = self.L_level(z_L + z_H)  # inyección: z_H entra en z_L (suma)
-            z_H = self.H_level(z_H + z_L)  # inyección: z_L entra en z_H (suma)
+        """Recurrencia jerárquica con retropropagación truncada (BPTT).
+
+        Se corren TODOS los ciclos en forward, pero solo las últimas `bp_steps`
+        pasadas conservan el grafo de autograd; el resto corre con
+        torch.set_grad_enabled(False). Así la VRAM no escala con (H_cycles x
+        L_cycles) sino con unas pocas pasadas, evitando OOM en T4.
+        En inferencia (sin grad) todo corre en no_grad de todos modos.
+        """
+        cfg = self.config
+        total_L = cfg.h_cycles * cfg.l_cycles
+        bp = max(1, getattr(cfg, "bp_steps", 2))
+        H_bp = min(cfg.h_cycles, max(1, bp - 1))
+        L_bp = max(1, bp - H_bp)
+
+        seq_k = 0
+        for i in range(cfg.h_cycles):
+            for _k in range(cfg.l_cycles):
+                keep = seq_k >= total_L - L_bp
+                with torch.set_grad_enabled(torch.is_grad_enabled() and keep):
+                    z_L = self.L_level(z_L + z_H)  # inyección: z_H entra en z_L
+                seq_k += 1
+            keep_h = i >= cfg.h_cycles - H_bp
+            with torch.set_grad_enabled(torch.is_grad_enabled() and keep_h):
+                z_H = self.H_level(z_H + z_L)  # inyección: z_L entra en z_H
         return z_H
 
     def forward(self, input_ids, labels=None):
