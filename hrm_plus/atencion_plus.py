@@ -186,15 +186,22 @@ class MoAAttention(nn.Module):
         return top_i, top_w, probs, logits_r
 
     def _mezclar_q(self, x, top_i, top_w):
-        """Q'[b,t,h] = g1·Q'1 + g2·Q'2 (gates consumidos acá).
-        [B,Sq,H,d]. Los gates NO se aplican después del SDPA."""
-        apilada = torch.stack([e.qp_completa(x) for e in self.expertos], dim=0)
-        # apilada: [E,B,Sq,H,d] -> [B,Sq,H,E,d]
-        apilada = apilada.permute(1, 2, 3, 0, 4)
-        d = apilada.shape[-1]
-        idx = top_i.unsqueeze(-1).expand(-1, -1, -1, -1, d)   # [B,Sq,H,k,d]
-        sel = apilada.gather(3, idx)                           # Q' de los k elegidos
-        return (sel * top_w.unsqueeze(-1)).sum(dim=3)          # mezcla ponderada
+        """Q'[b,t,h] = g1·Q'1 + g2·Q'2 SIN Q duplicadas: cada experto
+        calcula Q' solo en los tokens donde fue elegido (gather de X,
+        Q-proj parcial, scatter ponderado). Gates consumidos acá."""
+        B, Sq, _ = x.shape
+        H, d = self.num_heads, self.head_dim
+        Qbuf = torch.zeros(B, Sq, H, d, device=x.device, dtype=x.dtype)
+        for b in range(B):
+            for e, exp in enumerate(self.expertos):
+                # Peso del experto e por cabeza (0 si no elegido).
+                w = (top_w[b] * (top_i[b] == e)).sum(dim=-1)   # [Sq,H]
+                m = w.abs().sum(dim=-1) > 0                    # [Sq] tokens que lo usan
+                if not m.any():
+                    continue
+                qe = exp.qp_completa(x[b:b+1][:, m])            # [1,N,H,d]
+                Qbuf[b][m] += w[m].unsqueeze(-1) * qe[0]
+        return Qbuf
 
     def _aux(self, probs, logits_r, top_i, x):
         plana = probs.reshape(-1, self.num_expertos)     # [N,E]
