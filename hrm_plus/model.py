@@ -46,6 +46,7 @@ class Config:
     moa_topk = 2
     moa_aux_w = 0.01
     moa_z_w = 0.001
+    moa_ruido = True
     # capas POR nivel (H y L usan este TransformerCore)
     layers = 4
     h_cycles = 2
