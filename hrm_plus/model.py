@@ -15,6 +15,11 @@ los bloques SDPA que ya funcionaban en laurelia.
 
 import math
 import inspect
+import os as _os
+import sys as _sys
+# Colab/terminal: el script puede correrse desde otro cwd; asegura que los
+# módulos del mismo directorio (rope, atencion_plus) se puedan importar.
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F

@@ -12,6 +12,10 @@ corre en cualquier GPU normal (T4 incluida) y en CPU.
   GQA completa y la salida se pondera por el router.
 """
 
+import os as _os
+import sys as _sys
+# Asegura import del mismo directorio (rope) en Colab/cualquier cwd.
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
