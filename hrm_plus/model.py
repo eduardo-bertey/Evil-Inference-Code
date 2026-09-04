@@ -18,12 +18,13 @@ import inspect
 import os as _os
 import sys as _sys
 # Colab/terminal: el script puede correrse desde otro cwd; asegura que los
-# módulos del mismo directorio (rope, atencion_plus) se puedan importar.
+# módulos del mismo directorio (rope, moe_lineal) se puedan importar.
 _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from rope import RoPE
+from moe_lineal import MoELineal
 
 
 class Config:
@@ -38,15 +39,14 @@ class Config:
     rotary_pct = 0.25
 
     # --- HRM: niveles recurrentes ---
-    # --- HRM+: atención (moa = mezcla de expertos keyless [defecto],
-    # gqa = original, keyless = un solo experto sin K).
+    # --- HRM+: atención Keyless (sin K, cache solo-V) con MoE sobre sus
+    # lineales (q/v/o: 4 expertos top-2 + 1 compartido fijo). FFN intacto.
     # Todo torch puro, sin CUDA avanzado.
-    atencion = "moa"
-    moa_expertos = 4
-    moa_topk = 2
-    moa_aux_w = 0.01
-    moa_z_w = 0.001
-    moa_ruido = True
+    moe_expertos = 4
+    moe_topk = 2
+    moe_aux_w = 0.01
+    moe_z_w = 0.001
+    moe_ruido = True
     # capas POR nivel (H y L usan este TransformerCore)
     layers = 4
     h_cycles = 2
@@ -71,7 +71,9 @@ def repeat_kv(x, num_heads, num_kv_groups):
 
 
 class Attention(nn.Module):
-    """GQA + RoPE + SDPA (sin flash-attention). Igual que laurelia."""
+    """Keyless + MoE en lineales (q/v/o: 4 expertos top-2 + 1 compartido
+    fijo). Sin K: Q' = X·WQ·WR, scores contra V, cache solo-V.
+    FFN intacto. Un solo SDPA."""
     def __init__(self, config):
         super().__init__()
         self.num_heads = config.heads
@@ -79,35 +81,33 @@ class Attention(nn.Module):
         self.head_dim = config.dim // config.heads
         self.causal = True
 
-        self.q_proj = nn.Linear(config.dim, self.num_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
+        self.q_proj = MoELineal(config.dim, self.num_heads * self.head_dim, config)
+        self.v_proj = MoELineal(config.dim, self.num_kv_groups * self.head_dim, config)
+        self.o_proj = MoELineal(config.dim, config.dim, config, residual=True)
+        self.wr = nn.Parameter(torch.empty(self.num_heads, self.head_dim, self.head_dim))
+        nn.init.trunc_normal_(self.wr, std=0.02)
         self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, "rotary_pct", 0.25))
         self.attn_dropout = nn.Dropout(config.drop)
 
-        self.q_proj.is_attention = True
-        self.k_proj.is_attention = True
-        self.v_proj.is_attention = True
-        self.o_proj.is_residual_proj = True
+    def _qp(self, x):
+        B, T, _ = x.shape
+        q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
+        return torch.einsum("bthd,hde->bthe", q, self.wr)
 
     def forward(self, x):
         B, T, D = x.shape
-        q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
-        k = self.k_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
+        qp = self._qp(x)
         v = self.v_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
 
-        q, k = self.rope(q, k, 0)
+        qp, v = self.rope(qp, v, 0)
 
-        k = repeat_kv(k, self.num_heads, self.num_kv_groups)
         v = repeat_kv(v, self.num_heads, self.num_kv_groups)
 
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
+        q = qp.transpose(1, 2)
         v = v.transpose(1, 2)
 
         att_output = F.scaled_dot_product_attention(
-            q, k, v,
+            q, v, v,
             dropout_p=self.attn_dropout.p if self.training else 0.0,
             is_causal=True,
         )
@@ -117,26 +117,21 @@ class Attention(nn.Module):
 
     def forward_with_cache(self, x, offset, cache):
         B, S_new, _ = x.shape
-        q_new = self.q_proj(x).view(B, S_new, self.num_heads, self.head_dim)
-        k_new = self.k_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
+        qp_new = self._qp(x)
         v_new = self.v_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
-        q_new, k_new = self.rope(q_new, k_new, offset)
+        qp_new, v_new = self.rope(qp_new, v_new, offset)
 
-        if cache is not None:
-            k_full = torch.cat([cache[0], k_new], dim=1)
-            v_full = torch.cat([cache[1], v_new], dim=1)
-        else:
-            k_full = k_new
+        if cache is None:
             v_full = v_new
-        new_cache = (k_full.clone(), v_full.clone())
+        else:
+            v_full = torch.cat([cache, v_new], dim=1)
+        new_cache = v_full.clone()
 
-        k_exp = repeat_kv(k_full, self.num_heads, self.num_kv_groups)
         v_exp = repeat_kv(v_full, self.num_heads, self.num_kv_groups)
-        q = q_new.transpose(1, 2)
-        k = k_exp.transpose(1, 2)
+        q = qp_new.transpose(1, 2)
         v = v_exp.transpose(1, 2)
 
-        att_output = F.scaled_dot_product_attention(q, k, v, is_causal=(cache is None))
+        att_output = F.scaled_dot_product_attention(q, v, v, is_causal=(cache is None))
         att_output = att_output.transpose(1, 2).contiguous().view(B, S_new, -1)
         return self.o_proj(att_output), new_cache
 
@@ -160,15 +155,7 @@ class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.RMSNorm(config.dim)
-        tipo = getattr(config, "atencion", "gqa")
-        if tipo == "moa":
-            from atencion_plus import MoAAttention
-            self.attn = MoAAttention(config)
-        elif tipo == "keyless":
-            from atencion_plus import KeylessAttention
-            self.attn = KeylessAttention(config)
-        else:
-            self.attn = Attention(config)
+        self.attn = Attention(config)
         self.ln_2 = nn.RMSNorm(config.dim)
         self.mlp = MLP(config)
 
