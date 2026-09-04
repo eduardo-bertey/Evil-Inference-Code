@@ -73,6 +73,14 @@ class Attention(nn.Module):
         q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
         return torch.einsum("bthd,hde->bthe", q, self.wr)
 
+    @torch.no_grad()
+    def fusionar_wq(self):
+        """WQ_eff = WQ·WR por cabeza (keylees.md §8). WR es la K
+        compactada en el espacio de V: en inferencia Q' = X·WQ_eff
+        en un paso en vez de X→WQ→WR."""
+        wq = self.q_proj.weight.view(self.num_heads, self.head_dim, -1)
+        return torch.einsum("hdo,hde->heo", wq, self.wr)
+
     def forward(self, x):
         B, T, D = x.shape
         qp = self._qp(x)
