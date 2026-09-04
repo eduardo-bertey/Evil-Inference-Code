@@ -17,8 +17,8 @@ from moe_lineal import MoELineal
 
 class Config:
     drop = 0.0
-    dim = 768
-    heads = 12
+    dim = 512
+    heads = 8
     kv_groups = 4
     layers = 16
     ffn_dim = 3072
