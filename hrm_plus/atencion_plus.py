@@ -31,7 +31,7 @@ def repeat_kv(x, num_heads, num_kv_groups):
 class KeylessAttention(nn.Module):
     """Atención sin claves: O = softmax(X·WQ·WR·(X·WV)ᵀ/√d)·X·WV.
 
-    - WR por cabeza (head_dim × head_dim), aprendida.
+    - WR compartido entre cabezas (head_dim × head_dim), aprendido.
     - RoPE se aplica al par (Q', V) con el mismo offset: el score
       q'·v queda con posición relativa y el cache sigue siendo solo V.
     - En inferencia se puede fusionar WQ_eff = WQ·WR (ver metodo
@@ -45,7 +45,10 @@ class KeylessAttention(nn.Module):
         self.head_dim = config.dim // config.heads
 
         self.q_proj = nn.Linear(config.dim, self.num_heads * self.head_dim, bias=False)
-        self.wr = nn.Parameter(torch.empty(self.num_heads, self.head_dim, self.head_dim))
+        # WR COMPARTIDO entre cabezas del experto: un solo subespacio value
+        # por experto (el router MoA elige experto; las cabezas se
+        # diferencian por WQ/WV). Evita que WR y router compitan.
+        self.wr = nn.Parameter(torch.empty(self.head_dim, self.head_dim))
         self.v_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
         self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
         self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, "rotary_pct", 0.25))
@@ -59,8 +62,8 @@ class KeylessAttention(nn.Module):
     def _qp(self, x):
         B, T, _ = x.shape
         q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
-        # Q' = Q · WR (por cabeza)
-        qp = torch.einsum("bthd,hde->bthe", q, self.wr)
+        # Q' = Q · WR (mismo WR para todas las cabezas)
+        qp = torch.einsum("bthd,de->bthe", q, self.wr)
         return qp
 
     def forward(self, x):
@@ -104,7 +107,7 @@ class KeylessAttention(nn.Module):
     def fusionar_wq(self):
         """Devuelve WQ_eff = WQ·WR por cabeza para inferencia rápida."""
         wq = self.q_proj.weight.view(self.num_heads, self.head_dim, -1)
-        return torch.einsum("hdo,hde->heo", wq, self.wr)
+        return torch.einsum("hdo,de->heo", wq, self.wr)
 
 
 class _ExpertoKeyless(nn.Module):
@@ -116,7 +119,8 @@ class _ExpertoKeyless(nn.Module):
         self.num_kv_groups = getattr(config, "kv_groups", config.heads)
         self.head_dim = config.dim // config.heads
         self.q_proj = nn.Linear(config.dim, self.num_heads * self.head_dim, bias=False)
-        self.wr = nn.Parameter(torch.empty(self.num_heads, self.head_dim, self.head_dim))
+        # Mismo criterio que KeylessAttention: WR compartido entre cabezas.
+        self.wr = nn.Parameter(torch.empty(self.head_dim, self.head_dim))
         self.v_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
         self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, "rotary_pct", 0.25))
         self.attn_dropout = nn.Dropout(config.drop)
@@ -127,7 +131,7 @@ class _ExpertoKeyless(nn.Module):
     def _qp(self, x):
         B, T, _ = x.shape
         q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
-        return torch.einsum("bthd,hde->bthe", q, self.wr)
+        return torch.einsum("bthd,de->bthe", q, self.wr)
 
     def forward(self, x):
         B, T, D = x.shape
