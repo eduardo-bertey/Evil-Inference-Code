@@ -39,9 +39,9 @@ class Config:
     rotary_pct = 0.25
 
     # --- HRM: niveles recurrentes ---
-    # --- HRM+: atención Keyless (sin K, cache solo-V) con MoE sobre sus
-    # lineales (q/v/o: 4 expertos top-2 + 1 compartido fijo). FFN intacto.
-    # Todo torch puro, sin CUDA avanzado.
+    # --- HRM+: atención Keyless (sin K, cache solo-V) con MoE en V y O
+    # (Q densa; hallazgo SwitchHead). 4 expertos top-2 + 1 compartido
+    # fijo por MoE. FFN intacto. Todo torch puro, sin CUDA avanzado.
     moe_expertos = 4
     moe_topk = 2
     moe_aux_w = 0.01
@@ -71,9 +71,9 @@ def repeat_kv(x, num_heads, num_kv_groups):
 
 
 class Attention(nn.Module):
-    """Keyless + MoE en lineales (q/v/o: 4 expertos top-2 + 1 compartido
-    fijo). Sin K: Q' = X·WQ·WR, scores contra V, cache solo-V.
-    FFN intacto. Un solo SDPA."""
+    """Keyless + MoE en V y O (Q densa, hallazgo SwitchHead: Q/K normales
+    + MoE en V+O rinde mejor). Sin K: Q' = X·WQ·WR, scores contra V,
+    cache solo-V. FFN intacto. Un solo SDPA."""
     def __init__(self, config):
         super().__init__()
         self.num_heads = config.heads
@@ -81,7 +81,8 @@ class Attention(nn.Module):
         self.head_dim = config.dim // config.heads
         self.causal = True
 
-        self.q_proj = MoELineal(config.dim, self.num_heads * self.head_dim, config)
+        self.q_proj = nn.Linear(config.dim, self.num_heads * self.head_dim, bias=False)
+        self.q_proj.is_attention = True
         self.v_proj = MoELineal(config.dim, self.num_kv_groups * self.head_dim, config)
         self.o_proj = MoELineal(config.dim, config.dim, config, residual=True)
         self.wr = nn.Parameter(torch.empty(self.num_heads, self.head_dim, self.head_dim))
