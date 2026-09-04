@@ -131,10 +131,10 @@ class MoAAttention(nn.Module):
     """Mixture of Attention (doc MoA + keyless), torch puro.
 
     - K/V COMPARTIDOS únicos (GQA); cada experto aporta Q' = (X·WQ_e)·WR_e.
-    - Router por token: w_gate (+ w_noise con ruido solo en train),
-      softmax, top-k SIN renormalizar, scatter disperso.
-    - CADA EXPERTO SU SDPA: O_e = softmax(Q'_e·K^T/√d)·V, luego
-      Y = Σ_e w_e·O_e (pesos del router). Sin SDPA único.
+    - Router top-k por (token, cabeza): dim → H*E logits (+ ruido solo
+      en train), softmax sobre E, SIN renormalizar.
+    - Q'[t,h] = g1·Q'1 + g2·Q'2 mezclada ANTES, UN SOLO SDPA, sin ×gate
+      después. Sin Q duplicadas (Q parcial por experto elegido).
     - Pérdidas: cv (CV²), switch (probs·freqs×E), z (logsumexp²).
     - Cache de decoding: UN solo (K, V) compartido para todos.
     """
@@ -154,9 +154,9 @@ class MoAAttention(nn.Module):
         self.expertos = nn.ModuleList([_ExpertoQ(config) for _ in range(self.num_expertos)])
         self.k_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
         self.v_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
-        # Router por token: E logits (top-k sin renormalizar).
-        self.w_gate = nn.Parameter(torch.zeros(config.dim, self.num_expertos))
-        self.w_noise = nn.Parameter(torch.zeros(config.dim, self.num_expertos))
+        # Router top-k por (token, cabeza): H*E logits por token.
+        self.w_gate = nn.Parameter(torch.zeros(config.dim, self.num_heads * self.num_expertos))
+        self.w_noise = nn.Parameter(torch.zeros(config.dim, self.num_heads * self.num_expertos))
         self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, "rotary_pct", 0.25))
         self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
         self.attn_dropout = nn.Dropout(config.drop)
