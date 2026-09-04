@@ -133,12 +133,12 @@ class MoAAttention(nn.Module):
 
     - K/V COMPARTIDOS únicos (GQA); la mezcla está solo en Q:
       cada experto aporta Q' = (X·WQ_e)·WR_e.
-    - Router por token: w_gate (+ w_noise con ruido solo en train),
-      softmax, top-k SIN renormalizar (como MoA), scatter disperso.
-    - Dispatch real: cada experto atiende solo sus tokens asignados
-      (gather por experto + index_add). Costo SDPA ≈ topk×, no E×.
-    - Máscara causal explícita por posiciones absolutas (los tokens
-      asignados no son contiguos: is_causal=True sería incorrecto).
+    - Router POR CABEZA (como MoA: map →{q por head}→ reduce):
+      w_gate (+ w_noise con ruido solo en train) de dim → H*E,
+      softmax sobre E, top-1 por cabeza SIN renormalizar.
+    - UN SOLO SDPA: Q_mezclada[t,h] = Q del experto elegido para esa
+      cabeza; la ponderación por gates va DESPUÉS (lineal, exacto).
+      Costo SDPA ≈ 1×.
     - Pérdidas MoA exactas: cv (CV²), switch (probs·freqs×E con
       frecuencias reales), z (logsumexp²). En self.last_aux.
     - Cache de decoding: UN solo (K, V) compartido para todos.
@@ -159,8 +159,9 @@ class MoAAttention(nn.Module):
         self.expertos = nn.ModuleList([_ExpertoQ(config) for _ in range(self.num_expertos)])
         self.k_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
         self.v_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
-        self.w_gate = nn.Parameter(torch.zeros(config.dim, self.num_expertos))
-        self.w_noise = nn.Parameter(torch.zeros(config.dim, self.num_expertos))
+        # Router por cabeza: H*E logits por token (un top-1 por cabeza).
+        self.w_gate = nn.Parameter(torch.zeros(config.dim, self.num_heads * self.num_expertos))
+        self.w_noise = nn.Parameter(torch.zeros(config.dim, self.num_heads * self.num_expertos))
         self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, "rotary_pct", 0.25))
         self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
         self.attn_dropout = nn.Dropout(config.drop)
@@ -177,76 +178,69 @@ class MoAAttention(nn.Module):
         return x.float().var() / (x.float().mean() ** 2 + eps)
 
     def _router(self, x):
-        """Gates dispersos [B,Sq,E] + probs/logits para el aux."""
-        logits_r = x @ self.w_gate
+        """Top-1 experto por (token, cabeza). Devuelve:
+        elige [B,Sq,H] (índice de experto), gates [B,Sq,H] (peso),
+        probs [B,Sq,H,E] y logits para el aux."""
+        B, Sq, _ = x.shape
+        logits_r = (x @ self.w_gate).view(B, Sq, self.num_heads, self.num_expertos)
         if self.ruido and self.training:
-            ruido_std = F.softplus(x @ self.w_noise) + 1e-2
+            ruido_std = F.softplus((x @ self.w_noise).view(B, Sq, self.num_heads, self.num_expertos)) + 1e-2
             logits_r = logits_r + torch.randn_like(logits_r) * ruido_std
         probs = torch.softmax(logits_r.float(), dim=-1).to(x.dtype)
-        top_w, top_i = torch.topk(probs, k=self.topk, dim=-1)
-        # MoA NO renormaliza el top-k.
-        gates = torch.zeros_like(probs)
-        gates.scatter_(2, top_i, top_w)
-        return gates, top_i, top_w, probs, logits_r
+        # Top-1 por cabeza, SIN renormalizar (MoA).
+        gate_w, elige = probs.max(dim=-1)   # [B,Sq,H]
+        return elige, gate_w, probs, logits_r
+
+    def _mezclar_q(self, x, elige):
+        """Q_mezclada[b,t,h] = Q' del experto elegido. [B,Sq,H,d]."""
+        apilada = torch.stack([e.qp_completa(x) for e in self.expertos], dim=0)
+        # apilada: [E,B,Sq,H,d] -> [B,Sq,H,E,d]
+        apilada = apilada.permute(1, 2, 3, 0, 4)
+        idx = elige.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, 1, apilada.shape[-1])
+        return apilada.gather(3, idx).squeeze(3)
+
+    def _aux(self, probs, logits_r, elige, x):
+        plana = probs.reshape(-1, self.num_expertos)     # [N,E]
+        suma = plana.sum(0)
+        with torch.no_grad():
+            cv = self._cv_cuadrado(F.normalize(suma, p=1, dim=0))
+            freqs = elige.reshape(-1).float().bincount(minlength=self.num_expertos)
+            switch = (F.normalize(suma, p=1, dim=0)
+                      * F.normalize(freqs, p=1, dim=0)).sum() * self.num_expertos
+        z = torch.logsumexp(logits_r.float(), dim=-1).pow(2).mean().to(x.dtype)
+        self.last_aux = self.cv_w * cv.to(x.dtype) + self.switch_w * switch.to(x.dtype) + self.z_w * z
 
     def forward(self, x):
         B, T, D = x.shape
         k = self.k_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
         v = self.v_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
-        # RoPE sobre secuencia completa (posiciones 0..T-1 correctas).
         k_full, v_full = self.rope(k, v, 0)
-        pos_q = torch.arange(T, device=x.device)
-        return self._nucleo(x, pos_q, k_full, v_full)
 
-    def _nucleo(self, x, pos_q, k_full, v_full):
-        """Dispatch disperso por experto con Q' de cada experto rotada por
-        RoPE completo ANTES del gather (posiciones absolutas correctas en
-        training, donde x es la secuencia completa)."""
-        B, Sq, D = x.shape
-        Tkv = k_full.shape[1]
-        gates, top_i, _, probs, logits_r = self._router(x)
-
+        elige, gate_w, probs, logits_r = self._router(x)
+        qp = self._mezclar_q(x, elige)                   # [B,T,H,d]
+        qp, _ = self.rope(qp, qp, 0)
+        q = qp.transpose(1, 2)                           # [B,H,T,d]
         k = repeat_kv(k_full, self.num_heads, self.num_kv_groups).transpose(1, 2)
         v = repeat_kv(v_full, self.num_heads, self.num_kv_groups).transpose(1, 2)
-        base = torch.arange(Tkv, device=x.device).unsqueeze(0)
-
-        out = torch.zeros(B, Sq, self.num_heads * self.head_dim,
-                          device=x.device, dtype=x.dtype)
-        for b in range(B):
-            for e, exp in enumerate(self.expertos):
-                toca = (top_i[b] == e).any(dim=-1)
-                n = int(toca.sum())
-                if n == 0:
-                    continue
-                qe_full = exp.qp_completa(x[b:b+1])              # [1,Sq,H,d]
-                qe_full, _ = self.rope(qe_full, qe_full, 0)     # offset 0: x es la secuencia completa
-                qe = qe_full[:, toca].transpose(1, 2)            # [1,H,n,d]
-                pos = pos_q[toca].unsqueeze(1)
-                mask = pos >= base
-                oe = F.scaled_dot_product_attention(
-                    qe, k[b:b+1], v[b:b+1], attn_mask=mask,
-                    dropout_p=self.attn_dropout.p if self.training else 0.0,
-                )
-                oe = oe.transpose(1, 2).reshape(1, n, -1)
-                out[b][toca] += gates[b][toca][:, e:e+1] * oe[0]
+        # UN SOLO SDPA (como MoA: map -> attention -> reduce).
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=True,
+        )
+        out = out.transpose(1, 2)                        # [B,T,H,d]
+        out = out * gate_w.unsqueeze(-1)                 # reduce: pondera por gates
+        out = out.reshape(B, T, -1)
 
         if self.training:
-            with torch.no_grad():
-                plana = probs.reshape(-1, self.num_expertos)
-                suma = plana.sum(0)
-                cv = self._cv_cuadrado(F.normalize(suma, p=1, dim=0))
-                freqs = gates.reshape(-1, self.num_expertos).gt(0).float().sum(0)
-                switch = (F.normalize(suma, p=1, dim=0)
-                          * F.normalize(freqs, p=1, dim=0)).sum() * self.num_expertos
-            z = torch.logsumexp(logits_r.float(), dim=-1).pow(2).mean().to(x.dtype)
-            self.last_aux = self.cv_w * cv.to(x.dtype) + self.switch_w * switch.to(x.dtype) + self.z_w * z
+            self._aux(probs, logits_r, elige, x)
         else:
             self.last_aux = torch.tensor(0.0, device=x.device)
         return self.o_proj(out)
 
     def forward_with_cache(self, x, offset, cache):
-        """cache = (k_full, v_full) COMPARTIDO o None. Los tokens nuevos
-        llegan contiguos (offset..offset+Sq-1): RoPE con offset directo."""
+        """cache = (k_full, v_full) COMPARTIDO o None. UN SOLO SDPA también
+        en decoding: Q mezclada por cabeza + máscara causal explícita."""
         B, S_new, D = x.shape
         k_new = self.k_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
         v_new = self.v_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
@@ -257,38 +251,18 @@ class MoAAttention(nn.Module):
             k_full = torch.cat([cache[0], k_new], dim=1)
             v_full = torch.cat([cache[1], v_new], dim=1)
         new_cache = (k_full.clone(), v_full.clone())
-
-        pos_q = torch.arange(offset, offset + S_new, device=x.device)
-        out = self._nucleo_cache(x, pos_q, k_full, v_full)
-        self.last_aux = torch.tensor(0.0, device=x.device)
-        return self.o_proj(out), new_cache
-
-    def _nucleo_cache(self, x, pos_q, k_full, v_full):
-        """Dispatch disperso donde Q' usa RoPE con offset directo (tokens
-        nuevos contiguos). Sin aux (solo inferencia)."""
-        B, Sq, D = x.shape
         Tkv = k_full.shape[1]
-        gates, top_i, _, _, _ = self._router(x)
 
+        elige, gate_w, _, _ = self._router(x)
+        qp = self._mezclar_q(x, elige)
+        qp, _ = self.rope(qp, qp, offset)   # nuevos contiguos: offset directo
+        q = qp.transpose(1, 2)
         k = repeat_kv(k_full, self.num_heads, self.num_kv_groups).transpose(1, 2)
         v = repeat_kv(v_full, self.num_heads, self.num_kv_groups).transpose(1, 2)
-        base = torch.arange(Tkv, device=x.device).unsqueeze(0)
-
-        out = torch.zeros(B, Sq, self.num_heads * self.head_dim,
-                          device=x.device, dtype=x.dtype)
-        for b in range(B):
-            for e, exp in enumerate(self.expertos):
-                toca = (top_i[b] == e).any(dim=-1)
-                n = int(toca.sum())
-                if n == 0:
-                    continue
-                qe = exp.qp_completa(x[b:b+1])[:, toca]          # [1,n,H,d]
-                qe, _ = self.rope(qe, qe, int(pos_q[toca][0].item()))
-                qe = qe.transpose(1, 2)
-                pos = pos_q[toca].unsqueeze(1)
-                mask = pos >= base
-                oe = F.scaled_dot_product_attention(
-                    qe, k[b:b+1], v[b:b+1], attn_mask=mask)
-                oe = oe.transpose(1, 2).reshape(1, n, -1)
-                out[b][toca] += gates[b][toca][:, e:e+1] * oe[0]
-        return out
+        pos_q = torch.arange(offset, offset + S_new, device=x.device).unsqueeze(1)
+        mask = pos_q >= torch.arange(Tkv, device=x.device).unsqueeze(0)
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
+        out = out.transpose(1, 2) * gate_w.unsqueeze(-1)
+        out = out.reshape(B, S_new, -1)
+        self.last_aux = torch.tensor(0.0, device=x.device)
+        return self.o_proj(out), new_cache
