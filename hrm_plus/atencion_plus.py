@@ -128,19 +128,14 @@ class _ExpertoQ(nn.Module):
 
 
 class MoAAttention(nn.Module):
-    """Mixture of Attention fiel a MoA (yikangshen/MoA), con expertos
-    keyless y torch puro (sin triton/flash/CUDA avanzado).
+    """Mixture of Attention (doc MoA + keyless), torch puro.
 
-    - K/V COMPARTIDOS únicos (GQA); la mezcla está solo en Q:
-      cada experto aporta Q' = (X·WQ_e)·WR_e.
-    - Router POR CABEZA (como MoA: map →{q por head}→ reduce):
-      w_gate (+ w_noise con ruido solo en train) de dim → H*E,
-      softmax sobre E, top-1 por cabeza SIN renormalizar.
-    - UN SOLO SDPA: Q_mezclada[t,h] = Q del experto elegido para esa
-      cabeza; la ponderación por gates va DESPUÉS (lineal, exacto).
-      Costo SDPA ≈ 1×.
-    - Pérdidas MoA exactas: cv (CV²), switch (probs·freqs×E con
-      frecuencias reales), z (logsumexp²). En self.last_aux.
+    - K/V COMPARTIDOS únicos (GQA); cada experto aporta Q' = (X·WQ_e)·WR_e.
+    - Router por token: w_gate (+ w_noise con ruido solo en train),
+      softmax, top-k SIN renormalizar, scatter disperso.
+    - CADA EXPERTO SU SDPA: O_e = softmax(Q'_e·K^T/√d)·V, luego
+      Y = Σ_e w_e·O_e (pesos del router). Sin SDPA único.
+    - Pérdidas: cv (CV²), switch (probs·freqs×E), z (logsumexp²).
     - Cache de decoding: UN solo (K, V) compartido para todos.
     """
 
@@ -159,9 +154,9 @@ class MoAAttention(nn.Module):
         self.expertos = nn.ModuleList([_ExpertoQ(config) for _ in range(self.num_expertos)])
         self.k_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
         self.v_proj = nn.Linear(config.dim, self.num_kv_groups * self.head_dim, bias=False)
-        # Router por cabeza: H*E logits por token (un top-1 por cabeza).
-        self.w_gate = nn.Parameter(torch.zeros(config.dim, self.num_heads * self.num_expertos))
-        self.w_noise = nn.Parameter(torch.zeros(config.dim, self.num_heads * self.num_expertos))
+        # Router por token: E logits (top-k sin renormalizar).
+        self.w_gate = nn.Parameter(torch.zeros(config.dim, self.num_expertos))
+        self.w_noise = nn.Parameter(torch.zeros(config.dim, self.num_expertos))
         self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, "rotary_pct", 0.25))
         self.o_proj = nn.Linear(config.dim, config.dim, bias=False)
         self.attn_dropout = nn.Dropout(config.drop)
@@ -178,33 +173,35 @@ class MoAAttention(nn.Module):
         return x.float().var() / (x.float().mean() ** 2 + eps)
 
     def _router(self, x):
-        """Top-1 experto por (token, cabeza). Devuelve:
-        elige [B,Sq,H] (índice de experto), gates [B,Sq,H] (peso),
-        probs [B,Sq,H,E] y logits para el aux."""
+        """Top-k por (token, cabeza). Devuelve:
+        top_i [B,Sq,H,k] (expertos), top_w [B,Sq,H,k] (pesos SIN
+        renormalizar), probs [B,Sq,H,E] y logits para el aux."""
         B, Sq, _ = x.shape
         logits_r = (x @ self.w_gate).view(B, Sq, self.num_heads, self.num_expertos)
         if self.ruido and self.training:
             ruido_std = F.softplus((x @ self.w_noise).view(B, Sq, self.num_heads, self.num_expertos)) + 1e-2
             logits_r = logits_r + torch.randn_like(logits_r) * ruido_std
         probs = torch.softmax(logits_r.float(), dim=-1).to(x.dtype)
-        # Top-1 por cabeza, SIN renormalizar (MoA).
-        gate_w, elige = probs.max(dim=-1)   # [B,Sq,H]
-        return elige, gate_w, probs, logits_r
+        top_w, top_i = torch.topk(probs, k=self.topk, dim=-1)
+        return top_i, top_w, probs, logits_r
 
-    def _mezclar_q(self, x, elige):
-        """Q_mezclada[b,t,h] = Q' del experto elegido. [B,Sq,H,d]."""
+    def _mezclar_q(self, x, top_i, top_w):
+        """Q'[b,t,h] = g1·Q'1 + g2·Q'2 (gates consumidos acá).
+        [B,Sq,H,d]. Los gates NO se aplican después del SDPA."""
         apilada = torch.stack([e.qp_completa(x) for e in self.expertos], dim=0)
         # apilada: [E,B,Sq,H,d] -> [B,Sq,H,E,d]
         apilada = apilada.permute(1, 2, 3, 0, 4)
-        idx = elige.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, 1, apilada.shape[-1])
-        return apilada.gather(3, idx).squeeze(3)
+        d = apilada.shape[-1]
+        idx = top_i.unsqueeze(-1).expand(-1, -1, -1, -1, d)   # [B,Sq,H,k,d]
+        sel = apilada.gather(3, idx)                           # Q' de los k elegidos
+        return (sel * top_w.unsqueeze(-1)).sum(dim=3)          # mezcla ponderada
 
-    def _aux(self, probs, logits_r, elige, x):
+    def _aux(self, probs, logits_r, top_i, x):
         plana = probs.reshape(-1, self.num_expertos)     # [N,E]
         suma = plana.sum(0)
         with torch.no_grad():
             cv = self._cv_cuadrado(F.normalize(suma, p=1, dim=0))
-            freqs = elige.reshape(-1).bincount(minlength=self.num_expertos)
+            freqs = top_i.reshape(-1).bincount(minlength=self.num_expertos)
             switch = (F.normalize(suma, p=1, dim=0)
                       * F.normalize(freqs, p=1, dim=0)).sum() * self.num_expertos
         z = torch.logsumexp(logits_r.float(), dim=-1).pow(2).mean().to(x.dtype)
@@ -216,24 +213,22 @@ class MoAAttention(nn.Module):
         v = self.v_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
         k_full, v_full = self.rope(k, v, 0)
 
-        elige, gate_w, probs, logits_r = self._router(x)
-        qp = self._mezclar_q(x, elige)                   # [B,T,H,d]
+        top_i, top_w, probs, logits_r = self._router(x)
+        qp = self._mezclar_q(x, top_i, top_w)             # [B,T,H,d], gates ya consumidos
         qp, _ = self.rope(qp, qp, 0)
         q = qp.transpose(1, 2)                           # [B,H,T,d]
         k = repeat_kv(k_full, self.num_heads, self.num_kv_groups).transpose(1, 2)
         v = repeat_kv(v_full, self.num_heads, self.num_kv_groups).transpose(1, 2)
-        # UN SOLO SDPA (como MoA: map -> attention -> reduce).
+        # UN SOLO SDPA.
         out = F.scaled_dot_product_attention(
             q, k, v,
             dropout_p=self.attn_dropout.p if self.training else 0.0,
             is_causal=True,
         )
-        out = out.transpose(1, 2)                        # [B,T,H,d]
-        out = out * gate_w.unsqueeze(-1)                 # reduce: pondera por gates
-        out = out.reshape(B, T, -1)
+        out = out.transpose(1, 2).reshape(B, T, -1)      # concat 12 heads, sin ×gate
 
         if self.training:
-            self._aux(probs, logits_r, elige, x)
+            self._aux(probs, logits_r, top_i, x)
         else:
             self.last_aux = torch.tensor(0.0, device=x.device)
         return self.o_proj(out)
@@ -253,8 +248,8 @@ class MoAAttention(nn.Module):
         new_cache = (k_full.clone(), v_full.clone())
         Tkv = k_full.shape[1]
 
-        elige, gate_w, _, _ = self._router(x)
-        qp = self._mezclar_q(x, elige)
+        top_i, top_w, _, _ = self._router(x)
+        qp = self._mezclar_q(x, top_i, top_w)
         qp, _ = self.rope(qp, qp, offset)   # nuevos contiguos: offset directo
         q = qp.transpose(1, 2)
         k = repeat_kv(k_full, self.num_heads, self.num_kv_groups).transpose(1, 2)
@@ -262,7 +257,6 @@ class MoAAttention(nn.Module):
         pos_q = torch.arange(offset, offset + S_new, device=x.device).unsqueeze(1)
         mask = pos_q >= torch.arange(Tkv, device=x.device).unsqueeze(0)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
-        out = out.transpose(1, 2) * gate_w.unsqueeze(-1)
-        out = out.reshape(B, S_new, -1)
+        out = out.transpose(1, 2).reshape(B, S_new, -1)  # concat, sin ×gate
         self.last_aux = torch.tensor(0.0, device=x.device)
         return self.o_proj(out), new_cache

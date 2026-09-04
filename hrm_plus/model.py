@@ -42,7 +42,7 @@ class Config:
     # gqa = original, keyless = un solo experto sin K).
     # Todo torch puro, sin CUDA avanzado.
     atencion = "moa"
-    moa_expertos = 2
+    moa_expertos = 4
     moa_topk = 2
     moa_aux_w = 0.01
     moa_z_w = 0.001
