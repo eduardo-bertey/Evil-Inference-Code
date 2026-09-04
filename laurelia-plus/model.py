@@ -4,6 +4,10 @@ Init adaptativo por capa, weight tying, KV cache para inferencia.
 """
 
 import math, inspect
+import os as _os
+import sys as _sys
+# Colab/terminal: asegura imports del mismo directorio en cualquier cwd.
+_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
