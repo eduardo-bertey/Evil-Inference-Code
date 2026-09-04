@@ -74,6 +74,7 @@ class MoELineal(nn.Module):
                 suma = probs.sum(0)
                 cv = self._cv_cuadrado(F.normalize(suma, p=1, dim=0))
                 freqs = top_i.reshape(-1).bincount(minlength=self.num_expertos).float()
+                self.last_dist = (freqs / freqs.sum().clamp_min(1e-9)).detach()
                 switch = (F.normalize(suma, p=1, dim=0)
                           * F.normalize(freqs, p=1, dim=0)).sum() * self.num_expertos
             z = torch.logsumexp(logits_r.float(), dim=-1).pow(2).mean().to(x.dtype)

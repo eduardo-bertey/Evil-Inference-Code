@@ -44,8 +44,8 @@ class Config:
     # fijo por MoE. FFN intacto. Todo torch puro, sin CUDA avanzado.
     moe_expertos = 4
     moe_topk = 2
-    moe_aux_w = 0.01
-    moe_z_w = 0.001
+    moe_aux_w = 0.03
+    moe_z_w = 0.01
     moe_ruido = True
     # capas POR nivel (H y L usan este TransformerCore)
     layers = 4
