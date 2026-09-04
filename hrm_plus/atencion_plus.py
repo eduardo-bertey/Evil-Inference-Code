@@ -208,7 +208,7 @@ class MoAAttention(nn.Module):
         suma = plana.sum(0)
         with torch.no_grad():
             cv = self._cv_cuadrado(F.normalize(suma, p=1, dim=0))
-            freqs = top_i.reshape(-1).bincount(minlength=self.num_expertos)
+            freqs = top_i.reshape(-1).bincount(minlength=self.num_expertos).float()
             switch = (F.normalize(suma, p=1, dim=0)
                       * F.normalize(freqs, p=1, dim=0)).sum() * self.num_expertos
         z = torch.logsumexp(logits_r.float(), dim=-1).pow(2).mean().to(x.dtype)
