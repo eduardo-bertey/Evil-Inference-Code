@@ -183,7 +183,9 @@ class MoELayer(nn.Module):
                 lb_loss = torch.tensor(0.0, device=probs.device)
             topk_w, topk_i = probs.topk(self.top_k, dim=-1)  # (N, top_k)
             topk_w = topk_w / (topk_w.sum(dim=-1, keepdim=True) + 1e-9)
-            z_in = biased.flatten(-2)
+            # z-loss sobre logits SIN bias trick (el bias es balanceo loss-free;
+            # con bias, el forward full arrastra bias añejos y el z diverge).
+            z_in = logits.flatten(-2)
         else:
             # 3b) Entrenamiento Eq.(6): ancho global; top-k expertos en el
             # bucket discreto mas cercano, ejecucion al ancho continuo.
@@ -198,12 +200,13 @@ class MoELayer(nn.Module):
                 lb_loss = torch.tensor(0.0, device=probs_e.device)
             topk_w, topk_e = probs_e.topk(self.top_k, dim=-1)
             topk_w = topk_w / (topk_w.sum(dim=-1, keepdim=True) + 1e-9)
+            # z-loss sobre logits SIN bias (ver arriba).
+            z_in = logits[..., wi]
             # Re-mapeo a indices de ruta para reutilizar el mismo despacho
             topk_i = topk_e * self.n_widths + wi
             probs = torch.zeros(N, self.n_routes, device=xf.device)
             probs.scatter_(-1, topk_e * self.n_widths + wi,
                             probs_e.gather(-1, topk_e))
-            z_in = scores_e
 
         # 4) Capacity por ruta
         cap = max(1, int(math.ceil(self.top_k * N / self.n_routes * self.capacity_factor)))
