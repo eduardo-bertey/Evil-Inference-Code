@@ -43,8 +43,9 @@ def repeat_kv(x, num_heads, num_kv_groups):
 
 class Attention(nn.Module):
     """Keyless denso (Q densa, sin K ni MoE):
-    Q' = X·WQ·WR, scores contra V, cache solo-V. FFN intacto.
-    Un solo SDPA."""
+    Q' = X·WQ·WR con RoPE; V sin rotar como values y rotado
+    solo como keys: SDPA(Q'_rot, V_rot, V). Cache solo-V sin rotar.
+    FFN intacto. Un solo SDPA."""
     def __init__(self, config):
         super().__init__()
         self.num_heads = config.heads
@@ -80,15 +81,17 @@ class Attention(nn.Module):
         qp = self._qp(x)
         v = self.v_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
 
-        qp, v = self.rope(qp, v, 0)
+        qp, k = self.rope(qp, v, 0)  # V rotado solo como K; v queda sin rotar
 
+        k = repeat_kv(k, self.num_heads, self.num_kv_groups)
         v = repeat_kv(v, self.num_heads, self.num_kv_groups)
 
         q = qp.transpose(1, 2)
+        k = k.transpose(1, 2)
         v = v.transpose(1, 2)
 
         att_output = F.scaled_dot_product_attention(
-            q, v, v,
+            q, k, v,
             dropout_p=self.attn_dropout.p if self.training else 0.0,
             is_causal=True,
         )
@@ -102,22 +105,27 @@ class Attention(nn.Module):
         qp_new = self._qp(x)
         v_new = self.v_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
 
-        qp_new, v_new = self.rope(qp_new, v_new, offset)
+        qp_new, _ = self.rope(qp_new, v_new, offset)
 
         if cache is not None:
             v_full = torch.cat([cache, v_new], dim=1)
         else:
             v_full = v_new
 
-        new_cache = v_full.clone()
+        new_cache = v_full.clone()  # V sin rotar
 
+        # Keys: toda la secuencia acumulada rotada a offset 0.
+        _, k_full = self.rope(v_full, v_full, 0)
+
+        k_exp = repeat_kv(k_full, self.num_heads, self.num_kv_groups)
         v_exp = repeat_kv(v_full, self.num_heads, self.num_kv_groups)
 
         q = qp_new.transpose(1, 2)
+        k = k_exp.transpose(1, 2)
         v = v_exp.transpose(1, 2)
 
         att_output = F.scaled_dot_product_attention(
-            q, v, v,
+            q, k, v,
             is_causal=(cache is None),
         )
 
