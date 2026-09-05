@@ -156,27 +156,19 @@ def armar_bloque(n, ds, alpaca, seed):
     head_text = "".join(head)
     head_bytes = len(head_text.encode("utf-8"))
 
-    ds.block_idx = n
+    ds.block_idx = n - 1  # dataset.py es base-0: data.1.txt = ventana [0,10MB), sin seek inicial
     MIN_CORPUS = int(MIN_CORPUS_MB * 1024 * 1024)
-    cuerpo = ""
-    for intento in (1, 2):
-        ds._path = os.path.join(_DIR, f"wiki_block_{n}.txt")
-        if os.path.exists(ds._path):
-            os.remove(ds._path)
-        try:
-            ds.download_block()
-        except Exception as e:
-            print(f"  intento {intento} fallo: {e}")
-        with open(ds._path, "r", encoding="utf-8") as f:
-            cuerpo = f.read()
-        nbytes = len(cuerpo.encode("utf-8"))
-        if nbytes >= MIN_CORPUS:
-            break
-        print(f"  bloque {n} corto ({nbytes} bytes < {MIN_CORPUS}), streams frescos y reintento...")
-        ds._mix_iters = {}
-        ds._mix_byte_pos = {}
-    else:
-        nbytes = len(cuerpo.encode("utf-8"))
+    ds._path = os.path.join(_DIR, f"wiki_block_{n}.txt")
+    if os.path.exists(ds._path):
+        os.remove(ds._path)
+    # Un solo intento: los iteradores son persistentes (no se resetean, no se
+    # re-camina desde 0). La espera infinita por mix ya garantiza el cacho.
+    try:
+        ds.download_block()
+    except Exception as e:
+        print(f"  bloque {n} fallo: {e}")
+    with open(ds._path, "r", encoding="utf-8") as f:
+        cuerpo = f.read()
     if len(cuerpo.encode("utf-8")) < MIN_CORPUS:
         print(f"  bloque {n} defectuoso tras 2 intentos: NO se sube, fin del loop.")
         try:

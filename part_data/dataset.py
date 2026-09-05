@@ -158,9 +158,17 @@ class StreamingDataset:
         skip = self.block_idx * max_bytes
         pos = self._mix_byte_pos.get(label, 0)
         if pos > skip:
-            self._mix_iters[label] = None
-            self._mix_byte_pos[label] = 0
-            return [], 0
+            overlap = pos - skip
+            if overlap >= max_bytes:
+                # Realmente mas alla del bloque: reinicia stream.
+                self._mix_iters[label] = None
+                self._mix_byte_pos[label] = 0
+                return [], 0
+            # Overshoot parcial (micro-corte de red dejo pos dentro de la
+            # ventana): NO mata el iterador, lee el resto desde donde quedo.
+            print(f"  {label} overshoot {overlap} bytes, continua sin re-seek...")
+            max_bytes -= overlap
+            skip = pos
         consumed = pos
         exhausted = False
         if consumed < skip:
