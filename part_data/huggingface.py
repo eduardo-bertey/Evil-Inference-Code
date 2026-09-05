@@ -77,6 +77,36 @@ class HFDataManager:
         )
         print(f"  subido {self.repo_id}/data.{n}.txt")
 
+    def listar_bloques(self) -> list:
+        """Nombres data.N.txt ordenados por N que hay en el repo."""
+        import re
+        try:
+            files = self._get_api().list_repo_files(repo_id=self.repo_id, repo_type="dataset")
+        except Exception as e:
+            print(f"  no se pudo listar {self.repo_id}: {e}")
+            return []
+        nums = []
+        for f in files:
+            m = re.fullmatch(r"data\.(\d+)\.txt", f)
+            if m:
+                nums.append(int(m.group(1)))
+        return sorted(nums)
+
+    def borrar_bloque(self, n: int) -> bool:
+        try:
+            self._get_api().delete_file(
+                path_in_repo=f"data.{n}.txt",
+                repo_id=self.repo_id,
+                repo_type="dataset",
+                token=self._get_token(),
+                commit_message=f"borra bloque {n} defectuoso",
+            )
+            print(f"  borrado {self.repo_id}/data.{n}.txt")
+            return True
+        except Exception as e:
+            print(f"  no se pudo borrar data.{n}.txt: {e}")
+            return False
+
     def download_block(self, n: int, local_path: str) -> bool:
         try:
             path = hf_hub_download(repo_id=self.repo_id, filename=f"data.{n}.txt",

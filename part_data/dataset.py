@@ -124,7 +124,9 @@ class StreamingDataset:
             self._wiki_iter = iter(ds)
 
     def _ensure_mix_iter(self, label: str):
-        if label in self._mix_iters:
+        # Si el iterador murio (None), se recrea fresco: el seek por offset
+        # absoluto de _read_from_mix_iter lo posiciona donde corresponde.
+        if label in self._mix_iters and self._mix_iters[label] is not None:
             return
         ds_config = None
         for cfg, _, f in self.mixes:

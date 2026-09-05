@@ -22,6 +22,7 @@ import os
 import random
 import re
 import sys
+import time
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
@@ -35,6 +36,7 @@ REPO = "data-fine-es"   # repo dataset destino (namespace = tu usuario)
 BLOQUE_INICIAL = 1      # desde que bloque
 COUNT = 0               # cuantos bloques seguidos (0 = todos hasta MAX_BLOQUE)
 MAX_BLOQUE = 60500      # tope: al llegar se detiene (evita wrap/repeticion)
+MIN_CORPUS_MB = 5.0     # bajo esto el bloque es basura: reintenta 1 vez, si no, para sin subir
 SEED = 7                # semilla de las 10 alpaca por bloque
 SUBIR = True            # False = solo local, no sube
 BAJAR = 0               # >0 = baja data.BAJAR.txt y sale (ignora lo demas)
@@ -107,30 +109,40 @@ class BlockDataset(StreamingDataset):
                 continue
             mix_bytes = int(mb * 1024 * 1024)
             print(f"  Descargando {label} (bloque {self.block_idx}, {mb}MB)...")
-            try:
-                self._ensure_mix_iter(label)
-                it = self._mix_iters.get(label)
-                if it is None:
-                    print(f"  {label}: no se pudo crear el stream")
-                    continue
-                texts, appended = self._read_from_mix_iter(label, mix_bytes)
-                if label == "tuit":
-                    texts = [limpiar_tuit(t) for t in texts]
-                    texts = [t for t in texts if t]
-                    appended = sum(len(t.encode("utf-8")) for t in texts)
-                    print(f"  tuit limpio (@/http/#/espacios): {len(texts)} tuits, {appended} bytes")
-                self.last_bytes[label] = appended
-                if texts:
-                    out_path = mix_path or self._path
-                    with open(out_path, "a", encoding="utf-8") as f:
-                        for t in texts:
-                            f.write(t)
-                            f.write("\n\n")
-                    print(f"  Appended {appended} bytes from {label} for block {self.block_idx}")
-                else:
-                    print(f"  {label}: 0 bytes (vacío/agotado)")
-            except Exception as e:
-                print(f"  Mixing skipped {label}: {e}")
+            # Nunca None: espera y reintenta siempre hasta traer el cacho.
+            intento = 0
+            while True:
+                intento += 1
+                try:
+                    self._ensure_mix_iter(label)
+                    it = self._mix_iters.get(label)
+                    if it is None:
+                        print(f"  {label}: stream muerto, recreando (intento {intento})...")
+                        self._mix_iters.pop(label, None)
+                        time.sleep(5)
+                        continue
+                    texts, appended = self._read_from_mix_iter(label, mix_bytes)
+                    if not texts:
+                        print(f"  {label}: vacio, esperando 5s (intento {intento})...")
+                        time.sleep(5)
+                        continue
+                    break
+                except Exception as e:
+                    print(f"  {label} fallo ({e}), reintentando en 5s (intento {intento})...")
+                    self._mix_iters.pop(label, None)
+                    time.sleep(5)
+            if label == "tuit":
+                texts = [limpiar_tuit(t) for t in texts]
+                texts = [t for t in texts if t]
+                appended = sum(len(t.encode("utf-8")) for t in texts)
+                print(f"  tuit limpio (@/http/#/espacios): {len(texts)} tuits, {appended} bytes")
+            self.last_bytes[label] = appended
+            out_path = mix_path or self._path
+            with open(out_path, "a", encoding="utf-8") as f:
+                for t in texts:
+                    f.write(t)
+                    f.write("\n\n")
+            print(f"  Appended {appended} bytes from {label} for block {self.block_idx}")
 
 
 def armar_bloque(n, ds, alpaca, seed):
@@ -145,13 +157,33 @@ def armar_bloque(n, ds, alpaca, seed):
     head_bytes = len(head_text.encode("utf-8"))
 
     ds.block_idx = n
-    ds._path = os.path.join(_DIR, f"wiki_block_{n}.txt")
-    if os.path.exists(ds._path):
-        os.remove(ds._path)
-    ds.download_block()
-
-    with open(ds._path, "r", encoding="utf-8") as f:
-        cuerpo = f.read()
+    MIN_CORPUS = int(MIN_CORPUS_MB * 1024 * 1024)
+    cuerpo = ""
+    for intento in (1, 2):
+        ds._path = os.path.join(_DIR, f"wiki_block_{n}.txt")
+        if os.path.exists(ds._path):
+            os.remove(ds._path)
+        try:
+            ds.download_block()
+        except Exception as e:
+            print(f"  intento {intento} fallo: {e}")
+        with open(ds._path, "r", encoding="utf-8") as f:
+            cuerpo = f.read()
+        nbytes = len(cuerpo.encode("utf-8"))
+        if nbytes >= MIN_CORPUS:
+            break
+        print(f"  bloque {n} corto ({nbytes} bytes < {MIN_CORPUS}), streams frescos y reintento...")
+        ds._mix_iters = {}
+        ds._mix_byte_pos = {}
+    else:
+        nbytes = len(cuerpo.encode("utf-8"))
+    if len(cuerpo.encode("utf-8")) < MIN_CORPUS:
+        print(f"  bloque {n} defectuoso tras 2 intentos: NO se sube, fin del loop.")
+        try:
+            os.remove(ds._path)
+        except OSError:
+            pass
+        return None
     try:
         os.remove(ds._path)
     except OSError:
@@ -174,6 +206,16 @@ def main():
         hf.download_block(BAJAR, os.path.join(_DIR, f"data.{BAJAR}.txt"))
         return
     hf.login_global()
+    bloques = hf.listar_bloques() if SUBIR else []
+    if bloques:
+        print(f"En {hf.repo_id} hay {len(bloques)} bloques (1..{bloques[-1]}).")
+        ans = input("¿Borrar TODOS y empezar de cero? (si/no) [no]: ").strip().lower()
+        if ans in ("si", "sí", "s", "yes", "y"):
+            for n in bloques:
+                hf.borrar_bloque(n)
+            print("Repo limpio.")
+        else:
+            print("Se conservan; se saltean los existentes.")
     if SUBIR:
         hf.ensure_repo()
 
