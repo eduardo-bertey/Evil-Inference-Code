@@ -156,10 +156,17 @@ class StreamingDataset:
         skip = self.block_idx * max_bytes
         pos = self._mix_byte_pos.get(label, 0)
         if pos > skip:
-            self._mix_iters[label] = None
+            # Wrap/restart (ej. epoch nuevo): stream viejo inservible, crear uno fresco
+            # en vez de dejar None (si no, "no se pudo crear el stream" para siempre).
+            del self._mix_iters[label]
             self._mix_byte_pos[label] = 0
-            return [], 0
-        consumed = pos
+            self._ensure_mix_iter(label)
+            it = self._mix_iters.get(label)
+            if it is None:
+                return [], 0
+            consumed = 0
+        else:
+            consumed = pos
         exhausted = False
         if consumed < skip:
             print(f"  {label} seek {pos // 2**20}MB -> {skip // 2**20}MB ({skip} bytes)...")
