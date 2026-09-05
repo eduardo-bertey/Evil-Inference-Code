@@ -147,8 +147,7 @@ class MultiHeadLatentAttentionGQA(nn.Module):
 
         scores = s_c + s_r
         if self.attn_logit_cap is not None:
-            # In-place: evita un temporal del tamaño de scores (OOM en T4).
-            scores.div_(self.attn_logit_cap).tanh_().mul_(self.attn_logit_cap)
+            scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
 
         is_causal = self.causal if causal is None else causal
         if is_causal:
