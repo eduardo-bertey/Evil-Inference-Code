@@ -4,7 +4,9 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
 from model import TransformerLM
-from dataset import download_wikipedia_50mb, StreamingDataset
+import importlib
+train_data = importlib.import_module("train-data")
+from wikipedia import download_wikipedia_50mb
 from huggingface import HFManager, PeriodicPusher
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 from plot import PlotManager
@@ -96,9 +98,6 @@ bias_decay = 0.1
 # ─── MoSE Eq.(6): L = 1/2 [L(w_max) + L(w)], w ~ U(w_min, w_max) ───
 mose_w_min = 0.25
 mose_w_max = 1.0
-
-# ─── Data Mix ─────────────────────────────────────────────────────────────────
-mezcla = True   # Mix Spanish FineWeb2-HQ with Wikipedia ES
 
 plot_interval = 256
 
@@ -245,8 +244,7 @@ def main():
     else:
         bi = input(f"Block [{ckpt_block}]: ").strip()
         block_idx = int(bi) if bi else ckpt_block
-        sd = StreamingDataset(block_mb=3.0, block_idx=block_idx, mezcla=mezcla)
-        print(f"Mix {'enabled' if mezcla else 'disabled'} (FineWeb2-HQ)")
+        sd = train_data.TrainData(block_idx=block_idx)
         sd.load_tokens(tokenizer)
         n = len(sd.get_tokens())
         tokens_per_epoch = (n - seq_len - 1) // seq_len
