@@ -301,6 +301,7 @@ def main():
             continue
 
         micro = 0
+        w_last = 1.0  # ultimo ancho aleatorio Eq.(6), para el log
         for batch_start in range(0, n_seq, batch_size):
             if step >= total_steps:
                 break
@@ -326,6 +327,7 @@ def main():
                 # Un backward por forward (0.5x cada uno): misma matematica,
                 # mitad de pico de memoria que retener los dos grafos.
                 w_random = random.uniform(mose_w_min, mose_w_max)
+                w_last = w_random
                 if use_partial_rope:
                     logits_f, aux_f = model.forward_train_partial_rope(x, rotary_pct=rotary_pct, width=mose_w_max)
                 else:
@@ -425,8 +427,8 @@ def main():
                     for li, layer in enumerate(model.transformer.layers):
                         if getattr(layer, 'use_moe', False) and hasattr(layer.ffn, 'last_counts'):
                             ffn = layer.ffn
-                            total = ffn.last_total or 1
-                            pcts = (ffn.last_counts.float() / total * 100).tolist()
+                            csum = float(ffn.last_counts.sum().item()) or 1.0
+                            pcts = (ffn.last_counts.float() / csum * 100).tolist()
                             moe_dist[f"L{li}"] = pcts
                             balance_strs.append(f"L{li}:{ffn.balance_str()}")
                             # collect z-loss / load-balance from MoE layer if available
@@ -441,7 +443,7 @@ def main():
                             except Exception:
                                 pass
                     bal = " | ".join(balance_strs[:3])  # first 3 MoE layers only
-                    print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s z={total_z_loss:.6f} lb={total_lb_loss:.6f}")
+                    print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s z={total_z_loss:.6f} lb={total_lb_loss:.6f} w={w_last:.2f}")
                     if bal:
                         print(f"  MoE balance: {bal}")
                     if total_z_loss or total_lb_loss:
