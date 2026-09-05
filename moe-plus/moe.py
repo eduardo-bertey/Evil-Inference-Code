@@ -255,7 +255,7 @@ class MoELayer(nn.Module):
         return out, aux_loss
 
     def balance_str(self):
-        """'Expert: E0 .. | Width: 25% ..' del ultimo forward (suma 100%)."""
+        """'Expert: E0 .. | Width: 25% .. (avg ..)'. Reparto suma 100%."""
         counts = self.last_counts.reshape(self.n_experts, self.n_widths)
         total = int(counts.sum().item()) or 1
         exp = " ".join(f"E{e} {counts[e].sum().item()*100//total}%"
