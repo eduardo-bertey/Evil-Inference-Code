@@ -322,30 +322,41 @@ def main():
                 opt.zero_grad()
 
             if use_moe:
-                # MoSE Eq.(6): dos forwards por minibatch (w_max + w aleatorio),
-                # un solo backward. Ancho global para los expertos activos.
+                # MoSE Eq.(6): dos forwards por minibatch (w_max + w aleatorio).
+                # Un backward por forward (0.5x cada uno): misma matematica,
+                # mitad de pico de memoria que retener los dos grafos.
                 w_random = random.uniform(mose_w_min, mose_w_max)
                 if use_partial_rope:
                     logits_f, aux_f = model.forward_train_partial_rope(x, rotary_pct=rotary_pct, width=mose_w_max)
                 else:
                     logits_f, aux_f = model(x, width=mose_w_max)
                 loss_f = F.cross_entropy(logits_f.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
+                (0.5 * (loss_f + aux_f) / grad_accum).backward()
+                loss_f_log = float(loss_f.detach())
+                aux_f_log = float(aux_f.detach()) if isinstance(aux_f, torch.Tensor) else float(aux_f)
+                del logits_f, loss_f, aux_f
                 if use_partial_rope:
                     logits_r, aux_r = model.forward_train_partial_rope(x, rotary_pct=rotary_pct, width=w_random)
                 else:
                     logits_r, aux_r = model(x, width=w_random)
                 loss_r = F.cross_entropy(logits_r.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
-                loss = 0.5 * (loss_f + loss_r)
-                aux_loss = 0.5 * (aux_f + aux_r)
-                del logits_f, logits_r
+                (0.5 * (loss_r + aux_r) / grad_accum).backward()
+                loss_r_log = float(loss_r.detach())
+                aux_r_log = float(aux_r.detach()) if isinstance(aux_r, torch.Tensor) else float(aux_r)
+                del logits_r, loss_r, aux_r
+                # Escalares para el log (promedio Eq.6, sin grafo)
+                loss = torch.tensor(0.5 * (loss_f_log + loss_r_log))
+                aux_loss = torch.tensor(0.5 * (aux_f_log + aux_r_log))
             elif use_partial_rope:
                 logits, aux_loss = model.forward_train_partial_rope(x, rotary_pct=rotary_pct)
                 loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
+                loss = loss + aux_loss  # add MoE z-loss
+                (loss / grad_accum).backward()
             else:
                 logits, aux_loss = model(x)
                 loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
-            loss = loss + aux_loss  # add MoE z-loss
-            (loss / grad_accum).backward()
+                loss = loss + aux_loss  # add MoE z-loss
+                (loss / grad_accum).backward()
             micro += 1
 
             if micro >= grad_accum:
