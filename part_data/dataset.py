@@ -235,7 +235,12 @@ class StreamingDataset:
 
     def download_block(self, mix_path=None, iterator=None):
         max_bytes = int(self.block_mb * 1024 * 1024)
-        if iterator is None:
+        if self.block_mb <= 0:
+            # Sin bloque wiki (part_data): archivo vacio, solo mixes. Sin esto,
+            # el skip recorria TODO el stream de Wikipedia imprimiendo ruido.
+            open(self._path, "w").close()
+            written, exhausted = 0, False
+        elif iterator is None:
             self._ensure_wiki_iter()
             if self._wiki_iter is None or self._wiki_block_idx > self.block_idx:
                 self._wiki_iter = self._new_wiki_iter()
