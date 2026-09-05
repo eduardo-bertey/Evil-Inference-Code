@@ -434,19 +434,22 @@ class TransformerLM(nn.Module):
 
         # Initialize empty caches
         caches = [None] * num_layers
-        offset = 0
         generated = input_ids.clone()
 
-        for _ in range(max_new_tokens):
-            if use_partial_rope:
-                logits, caches = self.forward_with_cache_partial(
-                    generated[:, -1:], offset, caches, rotary_pct
-                )
-            else:
-                logits, caches = self.forward_with_cache(
-                    generated[:, -1:], offset, caches
-                )
+        # Prefill: codifica el prompt completo (posiciones 0..L-1) una vez.
+        # Sin esto, el cache quedaba vacio y se ignoraba el prompt.
+        prompt_len = generated.shape[1]
+        if use_partial_rope:
+            logits, caches = self.forward_with_cache_partial(
+                generated, 0, caches, rotary_pct
+            )
+        else:
+            logits, caches = self.forward_with_cache(
+                generated, 0, caches
+            )
+        offset = prompt_len
 
+        for _ in range(max_new_tokens):
             next_logits = logits[:, -1, :]  # (B, vocab_size)
 
             # Repetition penalty
@@ -479,6 +482,15 @@ class TransformerLM(nn.Module):
             probs = F.softmax(next_logits, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             generated = torch.cat([generated, next_token], dim=1)
+            # Forwardea solo el token nuevo en su posicion absoluta.
+            if use_partial_rope:
+                logits, caches = self.forward_with_cache_partial(
+                    generated[:, -1:], offset, caches, rotary_pct
+                )
+            else:
+                logits, caches = self.forward_with_cache(
+                    generated[:, -1:], offset, caches
+                )
             offset += 1
 
         return generated
