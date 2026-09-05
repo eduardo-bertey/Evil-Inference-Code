@@ -45,7 +45,12 @@ class Attention(nn.Module):
     """Keyless denso (Q densa, sin K ni MoE):
     Q' = X·WQ·WR con RoPE; V sin rotar como values y rotado
     solo como keys: SDPA(Q'_rot, V_rot, V). Cache solo-V sin rotar.
-    FFN intacto. Un solo SDPA."""
+    FFN intacto. Un solo SDPA.
+    Decode: K_t = RoPE(V_t, t), Q_t = RoPE(Q'_t, t), Cache_V = [V_0..V_t].
+    Con torch SDPA no hay kernel con RoPE implicito, asi que las keys
+    se obtienen rotando el cache acumulado (O(t) extra por paso, misma
+    memoria); con kernel fusionado (RoPE dentro de QK^T) ese coste sobra
+    y K no se almacena ni se recalcula."""
     def __init__(self, config):
         super().__init__()
         self.num_heads = config.heads
