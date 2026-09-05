@@ -20,6 +20,7 @@ import concurrent.futures
 import json
 import os
 import random
+import re
 import sys
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -57,6 +58,20 @@ def alpaca_block(ex):
     if ex.get("input", "").strip():
         p += INPUT_HEADER + ex["input"].strip()
     return p + RESP_HEADER + ex.get("output", "").strip() + "\n"
+
+
+_RE_URL = re.compile(r"https?://\S+|www\.\S+")
+_RE_MENCION = re.compile(r"@\w+")
+_RE_HASHTAG = re.compile(r"#\w+")
+_RE_ESPACIOS = re.compile(r"\s+")
+
+
+def limpiar_tuit(t):
+    """Saca URLs, @menciones y #hashtags; colapsa espacios."""
+    t = _RE_URL.sub("", t)
+    t = _RE_MENCION.sub("", t)
+    t = _RE_HASHTAG.sub("", t)
+    return _RE_ESPACIOS.sub(" ", t).strip()
 
 
 def load_alpaca():
@@ -98,6 +113,11 @@ class BlockDataset(StreamingDataset):
                     print(f"  {label}: no se pudo crear el stream")
                     continue
                 texts, appended = self._read_from_mix_iter(label, mix_bytes)
+                if label == "tuit":
+                    texts = [limpiar_tuit(t) for t in texts]
+                    texts = [t for t in texts if t]
+                    appended = sum(len(t.encode("utf-8")) for t in texts)
+                    print(f"  tuit limpio (@/http/#/espacios): {len(texts)} tuits, {appended} bytes")
                 self.last_bytes[label] = appended
                 if texts:
                     out_path = mix_path or self._path
