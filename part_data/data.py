@@ -33,7 +33,7 @@ from huggingface_hub import hf_hub_download  # noqa: E402
 # ============ CONFIG (editar aca, sin argumentos) ============
 REPO = "data-fine-es"   # repo dataset destino (namespace = tu usuario)
 BLOQUE_INICIAL = 1      # desde que bloque
-COUNT = 1               # cuantos bloques seguidos
+COUNT = 0               # cuantos bloques seguidos (0 = todos hasta MAX_BLOQUE)
 MAX_BLOQUE = 60500      # tope: al llegar se detiene (evita wrap/repeticion)
 SEED = 7                # semilla de las 10 alpaca por bloque
 SUBIR = True            # False = solo local, no sube
@@ -182,7 +182,11 @@ def main():
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         fut = None
-        ultimo = min(BLOQUE_INICIAL + COUNT, MAX_BLOQUE + 1)
+        if COUNT > 0:
+            ultimo = min(BLOQUE_INICIAL + COUNT, MAX_BLOQUE + 1)
+        else:
+            ultimo = MAX_BLOQUE + 1
+        print(f"Bloques {BLOQUE_INICIAL}..{ultimo - 1} (skip existentes)")
         for n in range(BLOQUE_INICIAL, ultimo):
             if SUBIR and hf.block_exists(n):
                 print(f"Bloque {n} ya existe en {hf.repo_id}, skip.")
@@ -199,7 +203,7 @@ def main():
                 fut = pool.submit(hf.upload_block, path, n)
         if fut is not None:
             fut.result()
-    if BLOQUE_INICIAL + COUNT > MAX_BLOQUE + 1:
+    if COUNT > 0 and BLOQUE_INICIAL + COUNT > MAX_BLOQUE + 1:
         print(f"Tope MAX_BLOQUE={MAX_BLOQUE} alcanzado, detenido (sin wrap).")
     print("Listo.")
 
