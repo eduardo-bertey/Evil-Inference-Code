@@ -7,7 +7,7 @@ Bloques: data.1.txt, data.2.txt, ...
 import getpass
 import os
 
-from huggingface_hub import HfApi, create_repo, hf_hub_download
+from huggingface_hub import HfApi, create_repo, hf_hub_download, login as hf_login
 
 
 class HFDataManager:
@@ -50,6 +50,14 @@ class HFDataManager:
         create_repo(repo_id=self.repo_id, repo_type="dataset",
                     exist_ok=True, private=False, token=self._get_token())
         print(f"Repo dataset listo: {self.repo_id} (publico)")
+
+    def login_global(self):
+        """Aplica el token globalmente para que load_dataset descargue autenticado."""
+        try:
+            hf_login(token=self._get_token(), add_to_git_credential=False)
+            print("HF token aplicado globalmente para descargas")
+        except Exception as e:
+            print(f"  No se pudo aplicar el token global: {e}")
 
     def block_exists(self, n: int) -> bool:
         try:

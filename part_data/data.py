@@ -173,6 +173,7 @@ def main():
     if BAJAR:
         hf.download_block(BAJAR, os.path.join(_DIR, f"data.{BAJAR}.txt"))
         return
+    hf.login_global()
     if SUBIR:
         hf.ensure_repo()
 
