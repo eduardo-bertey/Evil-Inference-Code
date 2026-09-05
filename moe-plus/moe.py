@@ -255,12 +255,14 @@ class MoELayer(nn.Module):
         return out, aux_loss
 
     def balance_str(self):
-        """'exp%: .. | w%: ..' del ultimo forward (sobre asignaciones: suma 100%)."""
+        """'Expert: E0 .. | Width: 25% ..' del ultimo forward (suma 100%)."""
         counts = self.last_counts.reshape(self.n_experts, self.n_widths)
         total = int(counts.sum().item()) or 1
-        exp_pcts = [f"{counts[e].sum().item()*100//total}%" for e in range(self.n_experts)]
-        w_pcts = [f"{counts[:, w].sum().item()*100//total}%" for w in range(self.n_widths)]
-        return f"exp: {'/'.join(exp_pcts)} | w: {'/'.join(w_pcts)}"
+        exp = " ".join(f"E{e} {counts[e].sum().item()*100//total}%"
+                       for e in range(self.n_experts))
+        w = " ".join(f"{int(w*100)}% {counts[:, i].sum().item()*100//total}%"
+                     for i, w in enumerate(self.widths))
+        return f"Expert: {exp} | Width: {w}"
 
 
 class DenseFFN(nn.Module):
