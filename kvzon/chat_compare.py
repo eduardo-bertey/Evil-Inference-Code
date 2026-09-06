@@ -6,11 +6,12 @@ Modificado (Q-first, diseno aprobado):
           con KV provisorias -> vector a^Q por capa (se borra tras usar).
   Fase B: capa por capa: capa 1 usa a_1^Q + Q (exacto); capa 2+ reusa su Q
           ya calculada + residual (Q' = Q + q_proj(dh), lineal = recomputo),
-          KV verdaderas del stream real -> vector a^{Q+res} que va a la cache
-          (cada cache distinta). Luego FF + residual, igual que vanilla.
-  Decode (atencion-unica, sin re-prefill): por token nuevo, las 16 Q +
-  K/V salen del entry stream en una sola operacion (1 sdpa batch=16);
-  despues solo corre la cadena FF con residuales; append a cada cache.
+          KV verdaderas del stream real -> a^{Q+res}; se GUARDA el vector
+          crudo (att+res) como un token mas por capa (cache cruda dim D;
+          K/V se proyectan al leer). Luego FF + residual.
+  Decode (atencion-unica, sin re-prefill): por token nuevo, primer Q de
+  las 16 capas de una vez (no se recalcula Q: solo evoluciona el residuo)
+  + 1 sdpa batch=16; despues cadena FF; se guarda el residuo en cache.
 
 Comandos:
   /temp <f> /topk <i> /topp <f> /rep <f> /ctx <i> /length <i>
@@ -58,11 +59,14 @@ class QFirst:
     def decode_step(self, tok_id, caches, offset):
         """Un token: TODA la atencion de una sola vez con la primera Q.
 
-        1) Entry stream e. Las 16 Q (una por capa) + K/V se calculan
-           juntos; UN solo sdpa batch=16 capas sobre cache+posicion nueva.
+        Caches CRUDAS por capa: vectores (att+res) dim D, un token mas por
+        step. K/V se proyectan al leer (K con rope offset 0).
+
+        1) Entry stream e. Las 16 Q (una por capa) + K/V nuevos juntos;
+           UN solo sdpa batch=16 sobre cache-proyectada+posicion nueva.
            Este pase NO guarda nada.
-        2) Cadena FF con residuales (sin mas atencion). Lo guardado en cada
-           cache sale del stream CON residual del FF (uh de la cadena).
+        2) Cadena por capa: su att + residuo; GUARDAR el vector crudo
+           como un token mas; despues su FF.
         """
         m = self.m
         H = m.blocks[0].attn.num_heads
@@ -86,9 +90,18 @@ class QFirst:
         rope0 = m.blocks[0].attn.rope
         Qr, _ = rope0(Qf, torch.zeros(16, 1, G, Hd, device=dev), offset)
         _, Kr = rope0(Qf * 0, Kf, offset)
-        # Caches: (1,S,G,Hd) por capa -> stack (1,16,S,G,Hd); S en dim 2.
-        Kc = torch.stack([c[0].squeeze(0) for c in caches], dim=0).unsqueeze(0)
-        Vc = torch.stack([c[1].squeeze(0) for c in caches], dim=0).unsqueeze(0)
+        # Caches CRUDAS (1,O,D) por capa -> K/V proyectados al leer.
+        # K cache con rope offset 0 (posiciones 0..O-1 contiguas).
+        Kc_list, Vc_list = [], []
+        for li, blk in enumerate(m.blocks):
+            raw = caches[li]                              # (1,O,D)
+            O = raw.shape[1]
+            Kc_list.append(blk.attn.rope(
+                torch.zeros(1, O, H, Hd, device=dev),
+                blk.attn.k_proj(raw).view(1, O, G, Hd), 0)[1])
+            Vc_list.append(blk.attn.v_proj(raw).view(1, O, G, Hd))
+        Kc = torch.stack(Kc_list, dim=0).unsqueeze(0)     # (1,16,O,G,Hd)
+        Vc = torch.stack(Vc_list, dim=0).unsqueeze(0)
         K_full = torch.cat([Kc, Kr.view(1, 16, 1, G, Hd)], dim=2)  # (1,16,O+1,G,Hd)
         V_full = torch.cat([Vc, Vf.view(1, 16, 1, G, Hd)], dim=2)
         B, L, S, _, _ = K_full.shape
@@ -101,23 +114,14 @@ class QFirst:
         A_all = [m.blocks[li].attn.o_proj(Ao16[:, li, :].unsqueeze(1))
                  for li in range(len(m.blocks))]
 
-        # 2) Cadena por capa: atencion (ya calculada 1 vez) + FF,
-        # GUARDAR 1 vez DESPUES del FF, del stream post-FF con residuo.
+        # 2) Cadena por capa: su att (Q primer pase) + residuo previo.
+        # GUARDAR el vector crudo (att+res) como un token mas.
         s = e
         new_caches = []
         for li, blk in enumerate(m.blocks):
-            attn = blk.attn
-            s = s + A_all[li]
+            s = s + A_all[li]  # att-Q primer pase + residuo
+            new_caches.append(torch.cat([caches[li], s.clone()], dim=1))
             s = s + blk.mlp(blk.ln_2(s))
-            uh_post = blk.ln_1(s)
-            K_s = attn.k_proj(uh_post).view(1, 1, G, Hd)
-            V_s = attn.v_proj(uh_post).view(1, 1, G, Hd)
-            _, Kr_s = attn.rope(torch.zeros(1, 1, H, Hd, device=dev), K_s, offset)
-            Kc_li, Vc_li = caches[li]
-            new_caches.append((
-                torch.cat([Kc_li, Kr_s], dim=1).clone(),
-                torch.cat([Vc_li, V_s], dim=1).clone(),
-            ))
         logits = m.lm_head(m.norm_f(s))
         return logits, new_caches
 
@@ -152,10 +156,6 @@ class QFirst:
             uh = blk.ln_1(h)
             if li == 0:
                 A = self.a_q[li]  # exacto: la entrada de capa 1 ES h0
-                K_new = attn.k_proj(uh).view(B, P, G, Hd)
-                V_new = attn.v_proj(uh).view(B, P, G, Hd)
-                # Solo interesa Kr (K rotada para la cache); Q dummy ceros.
-                _, Kr = attn.rope(self.q_saved[li] * 0, K_new, 0)
             else:
                 # Q ya calculada + residual (lineal = recomputo exacto)
                 u0 = blk.ln_1(h0)
@@ -169,8 +169,8 @@ class QFirst:
             n_qr.append(float(A.norm()))
             self.a_q[li] = None  # vector Q-only usado/borrado
             h = h + A
+            caches.append(h.clone())  # vector crudo (att+res) como tokens
             h = h + blk.mlp(blk.ln_2(h))
-            caches.append((Kr.clone(), V_new.clone()))  # cache distinta por capa
 
         self.a_q = []  # todos los vectores Q-only borrados
         self.diag = {"norm_a_q": n_q, "norm_a_qres": n_qr}

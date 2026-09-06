@@ -77,9 +77,9 @@ class TestKvzon(unittest.TestCase):
             _, caches = qf.prefill(self.x)
         P = self.x.shape[1]
         self.assertEqual(len(caches), 16)
-        for k, v in caches:
-            self.assertEqual(tuple(k.shape), (1, P, 4, 64))
-            self.assertEqual(tuple(v.shape), (1, P, 4, 64))
+        for c in caches:
+            # cache cruda: vectores (att+res) dim D, un token por posicion
+            self.assertEqual(tuple(c.shape), (1, P, 768))
 
     def test_q_reuse_identidad(self):
         # Q_saved + q_proj(dh) == q_proj(uh) (linealidad)
