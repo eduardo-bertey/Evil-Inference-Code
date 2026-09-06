@@ -442,6 +442,8 @@ def main():
                                 pass
                     bal = " | ".join(balance_strs[:3])  # first 3 MoE layers only
                     print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s z={total_z_loss:.6f} lb={total_lb_loss:.6f} w={w_last:.2f}")
+                    if use_moe:
+                        print(f"  MoSE fwd: full_loss={loss_f_log:.4f} random_loss={loss_r_log:.4f} (w={w_last:.2f}) full_aux={aux_f_log:.6g} random_aux={aux_r_log:.6g}")
                     if bal:
                         print(f"  MoE balance: {bal}")
                     if total_z_loss or total_lb_loss:
