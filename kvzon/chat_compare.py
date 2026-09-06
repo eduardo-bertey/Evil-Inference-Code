@@ -34,10 +34,6 @@ import torch.nn.functional as F
 from model import LLM, Config, repeat_kv
 from tokenizers import Tokenizer
 
-# Peso de att en la suma att+res (convexa: res lleva 1-ATT_W).
-# Capa 1 sin cambios (no tiene residuo previo).
-ATT_W = 0.5
-
 
 # ─── Q-first prefill ─────────────────────────────────────────────────────────
 class QFirst:
@@ -108,7 +104,7 @@ class QFirst:
         new_caches = []
         for li, blk in enumerate(m.blocks):
             A = A_all[li]
-            s = A if li == 0 else (1 - ATT_W) * s_prev + ATT_W * A
+            s = e + A if li == 0 else s_prev + A  # UNA sola suma a cache
             new_caches.append(torch.cat([caches[li], s.clone()], dim=1))
             s_prev = s + blk.mlp(blk.ln_2(s))
         logits = m.lm_head(m.norm_f(s_prev))
@@ -146,7 +142,7 @@ class QFirst:
         caches = []
         for li, blk in enumerate(m.blocks):
             A = A_all[li]
-            s = A if li == 0 else (1 - ATT_W) * s_prev + ATT_W * A
+            s = h0 + A if li == 0 else s_prev + A  # UNA sola suma a cache
             caches.append(s.clone())  # vector crudo (att+res) como tokens
             s_prev = s + blk.mlp(blk.ln_2(s))
 
