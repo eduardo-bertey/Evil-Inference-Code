@@ -72,17 +72,27 @@ class QFirst:
         dev = tok_id.device
         e = m.embeddings(tok_id)  # (1,1,D)
 
-        # Pasada 1: Q+att por capa al inicio, sin FF, sin guardar.
+        # Pasada 1: Q PROMEDIO de las 16 capas (una sola) + att por capa
+        # con intensidad decreciente (100% -> 10% en capas lejanas).
+        # Sin FF, sin guardar.
+        Qs = []
+        for blk in m.blocks:
+            attn = blk.attn
+            Qs.append(attn.q_proj(blk.ln_1(e)).view(1, 1, H, Hd))
+        Qavg = sum(Qs) / len(Qs)
+        nL = len(m.blocks)
+        Qr0, _ = m.blocks[0].attn.rope(
+            Qavg, torch.zeros(1, 1, G, Hd, device=dev), offset)
         A_all = []
         n_a = []
         for li, blk in enumerate(m.blocks):
             attn = blk.attn
+            scale = 1.0 - 0.9 * (li / max(nL - 1, 1))
+            Qr = scale * Qr0
             u = blk.ln_1(e)
-            Q = attn.q_proj(u).view(1, 1, H, Hd)
             K_new = attn.k_proj(u).view(1, 1, G, Hd)
             V_new = attn.v_proj(u).view(1, 1, G, Hd)
-            Qr, _ = attn.rope(Q, torch.zeros(1, 1, G, Hd, device=dev), offset)
-            _, Kr_new = attn.rope(Q * 0, K_new, offset)
+            _, Kr_new = attn.rope(Qr * 0, K_new, offset)
             raw = caches[li]                              # (1,O,D) cruda
             O = raw.shape[1]
             _, Kr_cache = attn.rope(
@@ -123,16 +133,26 @@ class QFirst:
         h0 = m.embeddings(input_ids)
         B, P, D = h0.shape
 
-        # Pasada 1: cada capa hace Q+att AL INICIO, sin FF, sin guardar.
+        # Pasada 1: Q PROMEDIO de las 16 capas (una sola) + att por capa
+        # con intensidad decreciente (100% -> 10% en capas lejanas).
+        # Sin FF, sin guardar.
+        Qs = []
+        for blk in m.blocks:
+            Qs.append(blk.attn.q_proj(blk.ln_1(h0)).view(B, P, H, Hd))
+        Qavg = sum(Qs) / len(Qs)
+        nL = len(m.blocks)
+        Qr0, _ = m.blocks[0].attn.rope(
+            Qavg, torch.zeros(B, P, G, Hd, device=h0.device), 0)
         A_all = []
         n_a = []
-        for blk in m.blocks:
+        for li, blk in enumerate(m.blocks):
             attn = blk.attn
+            scale = 1.0 - 0.9 * (li / max(nL - 1, 1))
+            Qr = scale * Qr0
             u = blk.ln_1(h0)
-            Q = attn.q_proj(u).view(B, P, H, Hd)
             K0 = attn.k_proj(u).view(B, P, G, Hd)
             V0 = attn.v_proj(u).view(B, P, G, Hd)
-            Qr, Kr = attn.rope(Q, K0, 0)
+            _, Kr = attn.rope(Qr * 0, K0, 0)
             A = attn.o_proj(self._sdpa_prompt(attn, Qr, Kr, V0))
             n_a.append(float(A.norm()))
             A_all.append(A)
