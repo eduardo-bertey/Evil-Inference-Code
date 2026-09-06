@@ -57,14 +57,14 @@ class QFirst:
 
     @torch.no_grad()
     def decode_step(self, tok_id, caches, offset):
-        """Un token: TODA la atencion de una sola vez con la primera Q.
+        """Un token: atencion POR CAPA (sin batch) con la primera Q.
 
         Caches CRUDAS por capa: vectores (att+res) dim D, un token mas por
         step. K/V se proyectan al leer (K con rope offset 0).
 
-        1) Entry stream e. Las 16 Q (una por capa) + K/V nuevos juntos;
-           UN solo sdpa batch=16 sobre cache-proyectada+posicion nueva.
-           Este pase NO guarda nada.
+        1) Entry stream e. Por capa (igual que Attention.forward_with_cache
+           del vanilla): Q + K/V nuevos, atencion sobre cache-proyectada +
+           posicion nueva. Este pase NO guarda nada.
         2) Cadena por capa: su att + residuo; GUARDAR el vector crudo
            como un token mas; despues su FF.
         """
@@ -75,44 +75,29 @@ class QFirst:
         dev = tok_id.device
         e = m.embeddings(tok_id)  # (1,1,D)
 
-        # 1) Primera Q + K/V de las 16 capas, todo junto.
-        # Layouts con batch: Qf (16,1,H,Hd), Kf/Vf (16,1,G,Hd).
-        Qs, Kn, Vn = [], [], []
-        for blk in m.blocks:
+        # 1) Primera Q + atencion por capa (sin batch). No guarda nada.
+        A_all = []
+        for li, blk in enumerate(m.blocks):
             attn = blk.attn
             u = blk.ln_1(e)
-            Qs.append(attn.q_proj(u))   # (1,1,D)
-            Kn.append(attn.k_proj(u))   # (1,1,G*Hd)
-            Vn.append(attn.v_proj(u))
-        Qf = torch.cat(Qs, dim=0).view(16, 1, H, Hd)
-        Kf = torch.cat(Kn, dim=0).view(16, 1, G, Hd)
-        Vf = torch.cat(Vn, dim=0).view(16, 1, G, Hd)
-        rope0 = m.blocks[0].attn.rope
-        Qr, _ = rope0(Qf, torch.zeros(16, 1, G, Hd, device=dev), offset)
-        _, Kr = rope0(Qf * 0, Kf, offset)
-        # Caches CRUDAS (1,O,D) por capa -> K/V proyectados al leer.
-        # K cache con rope offset 0 (posiciones 0..O-1 contiguas).
-        Kc_list, Vc_list = [], []
-        for li, blk in enumerate(m.blocks):
-            raw = caches[li]                              # (1,O,D)
+            Q = attn.q_proj(u).view(1, 1, H, Hd)
+            K_new = attn.k_proj(u).view(1, 1, G, Hd)
+            V_new = attn.v_proj(u).view(1, 1, G, Hd)
+            Qr, _ = attn.rope(Q, torch.zeros(1, 1, G, Hd, device=dev), offset)
+            _, Kr_new = attn.rope(Q * 0, K_new, offset)
+            raw = caches[li]                              # (1,O,D) cruda
             O = raw.shape[1]
-            Kc_list.append(blk.attn.rope(
+            _, Kr_cache = attn.rope(
                 torch.zeros(1, O, H, Hd, device=dev),
-                blk.attn.k_proj(raw).view(1, O, G, Hd), 0)[1])
-            Vc_list.append(blk.attn.v_proj(raw).view(1, O, G, Hd))
-        Kc = torch.stack(Kc_list, dim=0)              # (16,1,O,G,Hd)
-        Vc = torch.stack(Vc_list, dim=0)
-        K_full = torch.cat([Kc, Kr.unsqueeze(2)], dim=2)  # (16,1,O+1,G,Hd)
-        V_full = torch.cat([Vc, Vf.unsqueeze(2)], dim=2)
-        L, _, S, _, _ = K_full.shape
-        Ke = K_full.repeat_interleave(H // G, dim=3).transpose(2, 3).reshape(L * H, S, Hd)
-        Ve = V_full.repeat_interleave(H // G, dim=3).transpose(2, 3).reshape(L * H, S, Hd)
-        Qe = Qr.transpose(1, 2).reshape(L * H, 1, Hd)
-        # UN solo sdpa para las 16 capas:
-        Ao = F.scaled_dot_product_attention(Qe, Ke, Ve, is_causal=False)
-        Ao16 = Ao.view(L, -1)  # (16,768): concat de heads por capa
-        A_all = [m.blocks[li].attn.o_proj(Ao16[li].unsqueeze(0).unsqueeze(0))
-                 for li in range(len(m.blocks))]
+                attn.k_proj(raw).view(1, O, G, Hd), 0)
+            V_cache = attn.v_proj(raw).view(1, O, G, Hd)
+            K_full = torch.cat([Kr_cache, Kr_new], dim=1)  # (1,O+1,G,Hd)
+            V_full = torch.cat([V_cache, V_new], dim=1)
+            q = Qr.transpose(1, 2)
+            k = repeat_kv(K_full, H, G).transpose(1, 2)
+            v = repeat_kv(V_full, H, G).transpose(1, 2)
+            out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+            A_all.append(attn.o_proj(out.transpose(1, 2).contiguous().view(1, 1, -1)))
 
         # 2) Cadena por capa: capa 1 arranca en A_1 (SIN residuo: no hay
         # FF previo); resto: su att + residuo anterior. GUARDAR ese vector.
