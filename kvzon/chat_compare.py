@@ -117,6 +117,9 @@ class QFirst:
             s = s + blk.mlp(blk.ln_2(s))
         logits = m.lm_head(m.norm_f(s))
         return logits, new_caches
+
+    @torch.no_grad()
+    def prefill(self, input_ids):
         m = self.m
         H = m.blocks[0].attn.num_heads
         G = m.blocks[0].attn.num_kv_groups
