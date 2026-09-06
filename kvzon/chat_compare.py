@@ -124,6 +124,11 @@ class QFirst:
             new_caches.append(torch.cat([caches[li], s.clone()], dim=1))
             s = s + blk.mlp(blk.ln_2(s))
         logits = m.lm_head(m.norm_f(s))
+        if not torch.isfinite(logits).all():
+            bad_a = [li for li, a in enumerate(A_all) if not torch.isfinite(a).all()]
+            bad_c = [li for li, c in enumerate(new_caches) if not torch.isfinite(c).all()]
+            print(f"  [qfirst] logits no-finitos offset={offset} "
+                  f"max|logits|={float(logits.abs().max())} A_malas={bad_a} C_malas={bad_c}")
         return logits, new_caches
 
     @torch.no_grad()
@@ -180,6 +185,8 @@ class QFirst:
         self.q_saved = []  # las Q crudas nunca van a cache: se tiran
         self.diag = {"norm_a_q": n_q, "norm_a_qres": n_qr}
         logits = m.lm_head(m.norm_f(s))
+        if not torch.isfinite(logits).all():
+            print(f"  [qfirst] prefill no-finito max|logits|={float(logits.abs().max())}")
         return logits, caches
 
 
