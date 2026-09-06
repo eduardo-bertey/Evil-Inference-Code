@@ -82,25 +82,12 @@ class TestKvzon(unittest.TestCase):
             # cache cruda: vectores (att+res) dim D, un token por posicion
             self.assertEqual(tuple(c.shape), (1, P, 768))
 
-    def test_q_reuse_identidad(self):
-        # Q_saved + q_proj(dh) == q_proj(uh) (linealidad)
-        blk = self.model.blocks[3]
-        with torch.no_grad():
-            h0 = self.model.embeddings(self.x)
-            h = h0 + 0.01 * torch.randn_like(h0)
-            uh, u0 = blk.ln_1(h), blk.ln_1(h0)
-            q_saved = blk.attn.q_proj(u0)
-            d = float(((q_saved + blk.attn.q_proj(uh - u0)) - blk.attn.q_proj(uh)).abs().max())
-        print(f"\n  Q-reuse max|d|={d:.3g}")
-        self.assertLess(d, 1e-6)
-
     def test_vectores_borrados(self):
         qf = QFirst(self.model)
         with torch.no_grad():
             qf.prefill(self.x)
         self.assertEqual(qf.a_q, [])
-        self.assertEqual(len(qf.diag["norm_a_q"]), 16)
-        self.assertEqual(len(qf.diag["norm_a_qres"]), 16)
+        self.assertEqual(len(qf.diag["norm_a"]), 16)
 
     def test_decode_atencion_unica(self):
         # Decode Q-first: atencion congelada al entry stream -> DIVERGE del

@@ -2,13 +2,11 @@
 
 Vanilla: prefill token-por-token (LLM.generate actual) + cache por capa.
 Modificado (Q-first, diseno aprobado):
-  Fase A: desde embeddings, por capa se proyecta Q y se corre atencion
-          con KV provisorias -> vector a^Q por capa (se borra tras usar).
-  Fase B: capa por capa: capa 1 usa a_1^Q + Q (exacto); capa 2+ reusa su Q
-          ya calculada + residual (Q' = Q + q_proj(dh), lineal = recomputo),
-          KV verdaderas del stream real -> a^{Q+res}; se GUARDA el vector
+  Fase A: UNICO calculo de Q/K/V/att por capa (16 sdpa) desde embeddings.
+  Fase B: cadena SIN recomputo: capa 1 arranca en A_1 (sin residuo);
+          resto: att ya calculada + residuo previo. Se GUARDA el vector
           crudo (att+res) como un token mas por capa (cache cruda dim D;
-          K/V se proyectan al leer). Luego FF + residual.
+          K/V se proyectan al leer). Luego FF + residual. a^Q borrados.
   Decode (atencion-unica, sin re-prefill): por token nuevo, primer Q de
   las 16 capas de una vez (no se recalcula Q: solo evoluciona el residuo)
   + 1 sdpa batch=16; despues cadena FF; se guarda el residuo en cache.
@@ -125,53 +123,33 @@ class QFirst:
         h0 = m.embeddings(input_ids)
         B, P, D = h0.shape
 
-        # ── Fase A: Q/K/V sobre todas las capas desde embeddings ──
-        # (UNICA vez que se calcula KV del prompt; Fase B la reusa)
-        self.q_saved, self.a_q, self.k_saved, self.v_saved = [], [], [], []
+        # ── Fase A: UNICO calculo de Q/K/V/att por capa (16 sdpa) ──
+        self.a_q = []
         for blk in m.blocks:
             attn = blk.attn
             u = blk.ln_1(h0)
-            Q = attn.q_proj(u).view(B, P, H, Hd)          # pre-rope
+            Q = attn.q_proj(u).view(B, P, H, Hd)
             K0 = attn.k_proj(u).view(B, P, G, Hd)
             V0 = attn.v_proj(u).view(B, P, G, Hd)
             Qr, Kr = attn.rope(Q, K0, 0)
             A = attn.o_proj(self._sdpa_prompt(attn, Qr, Kr, V0))
-            self.q_saved.append(Q)
             self.a_q.append(A)
-            self.k_saved.append(Kr)
-            self.v_saved.append(V0)
 
-        # ── Fase B: capa 1 arranca en A_1 (SIN residuo: no hay FF previo);
-        # resto: su att + residuo anterior. Se GUARDA ese vector.
+        # ── Fase B: cadena con atenciones YA calculadas (SIN recomputo) ──
+        # capa 1 arranca en A_1 (sin residuo); resto: att + residuo previo.
         s = None
-        h_prev = None
         caches = []
-        n_q, n_qr = [], []
+        n_a = []
         for li, blk in enumerate(m.blocks):
-            attn = blk.attn
-            if li == 0:
-                A = self.a_q[li]
-            else:
-                # Q ya calculada + residual; KV UNA sola vez: reuso Fase A
-                uh = blk.ln_1(h_prev)
-                u0 = blk.ln_1(h0)
-                dQ = attn.q_proj(uh - u0).view(B, P, H, Hd)
-                Qp = self.q_saved[li] + dQ
-                Qr, _ = attn.rope(Qp, torch.zeros_like(self.v_saved[li]), 0)
-                A = attn.o_proj(self._sdpa_prompt(attn, Qr, self.k_saved[li], self.v_saved[li]))
-            n_q.append(float(self.a_q[li].norm()))
-            n_qr.append(float(A.norm()))
-            self.a_q[li] = None  # vector Q-only usado/borrado
+            A = self.a_q[li]
+            n_a.append(float(A.norm()))
+            self.a_q[li] = None  # usado/borrado
             s = A if li == 0 else s + A
             caches.append(s.clone())  # vector crudo (att+res) como tokens
             s = s + blk.mlp(blk.ln_2(s))
-            h_prev = s
 
-        self.a_q = []  # todos los vectores Q-only borrados
-        self.q_saved = []  # las Q crudas nunca van a cache: se tiran
-        self.k_saved = []  # KV provisorias usadas una vez: se tiran
-        self.v_saved = []
-        self.diag = {"norm_a_q": n_q, "norm_a_qres": n_qr}
+        self.a_q = []  # todos los vectores usados/borrados
+        self.diag = {"norm_a": n_a}
         logits = m.lm_head(m.norm_f(s))
         if not torch.isfinite(logits).all():
             print(f"  [qfirst] prefill no-finito max|logits|={float(logits.abs().max())}")
