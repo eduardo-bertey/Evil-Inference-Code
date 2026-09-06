@@ -58,10 +58,11 @@ class QFirst:
     def decode_step(self, tok_id, caches, offset):
         """Un token: TODA la atencion de una sola vez con la primera Q.
 
-        1) Entry stream e. Las 16 Q (una por capa) + K/V nuevos se calculan
+        1) Entry stream e. Las 16 Q (una por capa) + K/V se calculan
            juntos; UN solo sdpa batch=16 capas sobre cache+posicion nueva.
-        2) Despues solo corre la cadena FF con residuales (sin mas atencion).
-        3) Append de K/V nuevos a cada cache (distinta por capa).
+           Este pase NO guarda nada.
+        2) Cadena FF con residuales (sin mas atencion). Lo guardado en cada
+           cache sale del stream CON residual del FF (uh de la cadena).
         """
         m = self.m
         H = m.blocks[0].attn.num_heads
@@ -100,16 +101,21 @@ class QFirst:
         A_all = [m.blocks[li].attn.o_proj(Ao16[:, li, :].unsqueeze(1))
                  for li in range(len(m.blocks))]
 
-        # 2) Cadena FF con residuales (sin atencion)
+        # 2) Cadena FF con residuales (sin atencion). Lo que se GUARDA en
+        # cada cache sale del stream con residual del FF (no del pase Q).
+        s = e
         new_caches = []
         for li, blk in enumerate(m.blocks):
+            attn = blk.attn
+            uh_s = blk.ln_1(s)
+            K_s = attn.k_proj(uh_s).view(1, 1, G, Hd)
+            V_s = attn.v_proj(uh_s).view(1, 1, G, Hd)
+            _, Kr_s = attn.rope(torch.zeros(1, 1, H, Hd, device=dev), K_s, offset)
             Kc_li, Vc_li = caches[li]
             new_caches.append((
-                torch.cat([Kc_li, Kr[li].unsqueeze(0)], dim=1).clone(),
-                torch.cat([Vc_li, Vf[li].unsqueeze(0)], dim=1).clone(),
+                torch.cat([Kc_li, Kr_s], dim=1).clone(),
+                torch.cat([Vc_li, V_s], dim=1).clone(),
             ))
-        s = e
-        for li, blk in enumerate(m.blocks):
             s = s + A_all[li]
             s = s + blk.mlp(blk.ln_2(s))
         logits = m.lm_head(m.norm_f(s))
