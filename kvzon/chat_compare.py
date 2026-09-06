@@ -114,12 +114,13 @@ class QFirst:
         A_all = [m.blocks[li].attn.o_proj(Ao16[:, li, :].unsqueeze(1))
                  for li in range(len(m.blocks))]
 
-        # 2) Cadena por capa: su att (Q primer pase) + residuo previo.
-        # GUARDAR el vector crudo (att+res) como un token mas.
-        s = e
+        # 2) Cadena por capa: capa 1 arranca en A_1 (SIN residuo: no hay
+        # FF previo); resto: su att + residuo anterior. GUARDAR ese vector.
+        s = None
         new_caches = []
         for li, blk in enumerate(m.blocks):
-            s = s + A_all[li]  # att-Q primer pase + residuo
+            A = A_all[li]
+            s = A if li == 0 else s + A
             new_caches.append(torch.cat([caches[li], s.clone()], dim=1))
             s = s + blk.mlp(blk.ln_2(s))
         logits = m.lm_head(m.norm_f(s))
@@ -147,17 +148,19 @@ class QFirst:
             self.q_saved.append(Q)
             self.a_q.append(A)
 
-        # ── Fase B: capa por capa, residual + atencion local ──
-        h = h0
+        # ── Fase B: capa 1 arranca en A_1 (SIN residuo: no hay FF previo);
+        # resto: su att + residuo anterior. Se GUARDA ese vector.
+        s = None
+        h_prev = None
         caches = []
         n_q, n_qr = [], []
         for li, blk in enumerate(m.blocks):
             attn = blk.attn
-            uh = blk.ln_1(h)
             if li == 0:
-                A = self.a_q[li]  # exacto: la entrada de capa 1 ES h0
+                A = self.a_q[li]
             else:
                 # Q ya calculada + residual (lineal = recomputo exacto)
+                uh = blk.ln_1(h_prev)
                 u0 = blk.ln_1(h0)
                 dQ = attn.q_proj(uh - u0).view(B, P, H, Hd)
                 Qp = self.q_saved[li] + dQ
@@ -168,13 +171,14 @@ class QFirst:
             n_q.append(float(self.a_q[li].norm()))
             n_qr.append(float(A.norm()))
             self.a_q[li] = None  # vector Q-only usado/borrado
-            h = h + A
-            caches.append(h.clone())  # vector crudo (att+res) como tokens
-            h = h + blk.mlp(blk.ln_2(h))
+            s = A if li == 0 else s + A
+            caches.append(s.clone())  # vector crudo (att+res) como tokens
+            s = s + blk.mlp(blk.ln_2(s))
+            h_prev = s
 
         self.a_q = []  # todos los vectores Q-only borrados
         self.diag = {"norm_a_q": n_q, "norm_a_qres": n_qr}
-        logits = m.lm_head(m.norm_f(h))
+        logits = m.lm_head(m.norm_f(s))
         return logits, caches
 
 
