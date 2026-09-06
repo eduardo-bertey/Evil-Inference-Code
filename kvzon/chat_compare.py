@@ -125,8 +125,9 @@ class QFirst:
         h0 = m.embeddings(input_ids)
         B, P, D = h0.shape
 
-        # ── Fase A: Q sobre todas las capas desde embeddings ──
-        self.q_saved, self.a_q = [], []
+        # ── Fase A: Q/K/V sobre todas las capas desde embeddings ──
+        # (UNICA vez que se calcula KV del prompt; Fase B la reusa)
+        self.q_saved, self.a_q, self.k_saved, self.v_saved = [], [], [], []
         for blk in m.blocks:
             attn = blk.attn
             u = blk.ln_1(h0)
@@ -137,6 +138,8 @@ class QFirst:
             A = attn.o_proj(self._sdpa_prompt(attn, Qr, Kr, V0))
             self.q_saved.append(Q)
             self.a_q.append(A)
+            self.k_saved.append(Kr)
+            self.v_saved.append(V0)
 
         # ── Fase B: capa 1 arranca en A_1 (SIN residuo: no hay FF previo);
         # resto: su att + residuo anterior. Se GUARDA ese vector.
@@ -149,15 +152,13 @@ class QFirst:
             if li == 0:
                 A = self.a_q[li]
             else:
-                # Q ya calculada + residual (lineal = recomputo exacto)
+                # Q ya calculada + residual; KV UNA sola vez: reuso Fase A
                 uh = blk.ln_1(h_prev)
                 u0 = blk.ln_1(h0)
                 dQ = attn.q_proj(uh - u0).view(B, P, H, Hd)
                 Qp = self.q_saved[li] + dQ
-                K_new = attn.k_proj(uh).view(B, P, G, Hd)
-                V_new = attn.v_proj(uh).view(B, P, G, Hd)
-                Qr, Kr = attn.rope(Qp, K_new, 0)
-                A = attn.o_proj(self._sdpa_prompt(attn, Qr, Kr, V_new))
+                Qr, _ = attn.rope(Qp, torch.zeros_like(self.v_saved[li]), 0)
+                A = attn.o_proj(self._sdpa_prompt(attn, Qr, self.k_saved[li], self.v_saved[li]))
             n_q.append(float(self.a_q[li].norm()))
             n_qr.append(float(A.norm()))
             self.a_q[li] = None  # vector Q-only usado/borrado
@@ -168,6 +169,8 @@ class QFirst:
 
         self.a_q = []  # todos los vectores Q-only borrados
         self.q_saved = []  # las Q crudas nunca van a cache: se tiran
+        self.k_saved = []  # KV provisorias usadas una vez: se tiran
+        self.v_saved = []
         self.diag = {"norm_a_q": n_q, "norm_a_qres": n_qr}
         logits = m.lm_head(m.norm_f(s))
         if not torch.isfinite(logits).all():
