@@ -100,18 +100,18 @@ class QFirst:
                 torch.zeros(1, O, H, Hd, device=dev),
                 blk.attn.k_proj(raw).view(1, O, G, Hd), 0)[1])
             Vc_list.append(blk.attn.v_proj(raw).view(1, O, G, Hd))
-        Kc = torch.stack(Kc_list, dim=0).unsqueeze(0)     # (1,16,O,G,Hd)
-        Vc = torch.stack(Vc_list, dim=0).unsqueeze(0)
-        K_full = torch.cat([Kc, Kr.view(1, 16, 1, G, Hd)], dim=2)  # (1,16,O+1,G,Hd)
-        V_full = torch.cat([Vc, Vf.view(1, 16, 1, G, Hd)], dim=2)
-        B, L, S, _, _ = K_full.shape
-        Ke = K_full.repeat_interleave(H // G, dim=3).transpose(2, 3).reshape(B * L * H, S, Hd)
-        Ve = V_full.repeat_interleave(H // G, dim=3).transpose(2, 3).reshape(B * L * H, S, Hd)
-        Qe = Qr.transpose(1, 2).reshape(B * L * H, 1, Hd)
+        Kc = torch.stack(Kc_list, dim=0)              # (16,1,O,G,Hd)
+        Vc = torch.stack(Vc_list, dim=0)
+        K_full = torch.cat([Kc, Kr.unsqueeze(2)], dim=2)  # (16,1,O+1,G,Hd)
+        V_full = torch.cat([Vc, Vf.unsqueeze(2)], dim=2)
+        L, _, S, _, _ = K_full.shape
+        Ke = K_full.repeat_interleave(H // G, dim=3).transpose(2, 3).reshape(L * H, S, Hd)
+        Ve = V_full.repeat_interleave(H // G, dim=3).transpose(2, 3).reshape(L * H, S, Hd)
+        Qe = Qr.transpose(1, 2).reshape(L * H, 1, Hd)
         # UN solo sdpa para las 16 capas:
         Ao = F.scaled_dot_product_attention(Qe, Ke, Ve, is_causal=False)
-        Ao16 = Ao.view(B, L, H, Hd).transpose(1, 2).reshape(B, L, -1)
-        A_all = [m.blocks[li].attn.o_proj(Ao16[:, li, :].unsqueeze(1))
+        Ao16 = Ao.view(L, -1)  # (16,768): concat de heads por capa
+        A_all = [m.blocks[li].attn.o_proj(Ao16[li].unsqueeze(0).unsqueeze(0))
                  for li in range(len(m.blocks))]
 
         # 2) Cadena por capa: capa 1 arranca en A_1 (SIN residuo: no hay
@@ -177,6 +177,7 @@ class QFirst:
             h_prev = s
 
         self.a_q = []  # todos los vectores Q-only borrados
+        self.q_saved = []  # las Q crudas nunca van a cache: se tiran
         self.diag = {"norm_a_q": n_q, "norm_a_qres": n_qr}
         logits = m.lm_head(m.norm_f(s))
         return logits, caches
