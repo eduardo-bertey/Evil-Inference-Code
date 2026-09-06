@@ -211,16 +211,16 @@ def main():
     config = Config()
 
     tok_path = os.path.join(_KVZON, "tokenizer.json")
-    if not os.path.exists(tok_path):
-        sys.exit("Falta tokenizer.json en kvzon/. Corre download.py primero.")
+    ckpt_path = os.path.join(_KVZON, "checkpoint.pt")
+    if not os.path.exists(tok_path) or not os.path.exists(ckpt_path):
+        print("Faltan pesos en kvzon/, descargando automatico...")
+        import download
+        download.main()
     tok = Tokenizer.from_file(tok_path)
     config.emb_num = tok.get_vocab_size()
     eos_id = tok.token_to_id("eos_token")
-
     model = LLM(config).to(device)
-    ckpt_path = os.path.join(_KVZON, "checkpoint.pt")
-    if not os.path.exists(ckpt_path):
-        sys.exit("Falta checkpoint.pt en kvzon/. Corre download.py primero.")
+
     ckpt = torch.load(ckpt_path, map_location=device)
     ckpt["model"].pop("head.emb_weight", None)
     model.load_state_dict(ckpt["model"], strict=False)
