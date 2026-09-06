@@ -1,12 +1,14 @@
 """Chat comparativo laurelia-llm: vanilla vs Q-first (KV modificado).
 
 Vanilla: prefill token-por-token (LLM.generate actual) + cache por capa.
-Modificado (Q-first, diseno aprobado):
-  Fase A: UNICO calculo de Q/K/V/att por capa (16 sdpa) desde embeddings.
-  Fase B: cadena SIN recomputo: capa 1 arranca en A_1 (sin residuo);
-          resto: att ya calculada + residuo previo. Se GUARDA el vector
-          crudo (att+res) como un token mas por capa (cache cruda dim D;
-          K/V se proyectan al leer). Luego FF + residual. a^Q borrados.
+Modificado (Q-first): DOS pasadas por token.
+  Pasada 1 (att): Q fija por capa (una vez, no se recalcula) + atencion
+          1 vez por capa con K/V del stream actual. No guarda nada.
+  Pasada 2 (res): cadena FF con residuales; por capa se GUARDA el vector
+          crudo (att+res) como un token mas (cache cruda dim D; K/V se
+          proyectan al leer). Capa 1 sin residuo previo.
+  Siguiente token: Q, att, FF -> otro vector (cache vector 2, 3, ...).
+  50 tokens -> 50 vectores por capa. Atencion siempre dinamica.
   Decode (atencion-unica, sin re-prefill): por token nuevo, primer Q de
   las 16 capas de una vez (no se recalcula Q: solo evoluciona el residuo)
   + 1 sdpa batch=16; despues cadena FF; se guarda el residuo en cache.
@@ -39,13 +41,12 @@ ATT_W = 0.5
 
 # ─── Q-first prefill ─────────────────────────────────────────────────────────
 class QFirst:
-    """Prefill en dos fases. Solo prefill: el decode usa forward_with_cache."""
+    """Q fija una vez; att 1 vez por capa con K/V del stream actual (dinamica);
+    se guarda (att+res) crudo por capa. Sin recomputos."""
 
     def __init__(self, model):
         self.m = model
         self.cfg = model.config
-        self.a_q = []          # vectores a^Q (Fase A); se vacian en Fase B
-        self.q_saved = []      # Q pre-rope por capa (Fase A)
         self.diag = {}         # normas por capa para tests
 
     def _sdpa_prompt(self, attn, Qr, Kr, V):
@@ -59,16 +60,14 @@ class QFirst:
 
     @torch.no_grad()
     def decode_step(self, tok_id, caches, offset):
-        """Un token: atencion POR CAPA (sin batch) con la primera Q.
+        """Un token en DOS pasadas (att una vez, sin batch).
 
         Caches CRUDAS por capa: vectores (att+res) dim D, un token mas por
-        step. K/V se proyectan al leer (K con rope offset 0).
+        step (50 tokens -> 50 vectores). K/V se proyectan al leer.
 
-        1) Entry stream e. Por capa (igual que Attention.forward_with_cache
-           del vanilla): Q + K/V nuevos, atencion sobre cache-proyectada +
-           posicion nueva. Este pase NO guarda nada.
-        2) Cadena por capa: su att + residuo; GUARDAR el vector crudo
-           como un token mas; despues su FF.
+        Pasada 1: cada capa hace Q+att AL INICIO, sin FF, sin guardar.
+        Pasada 2: cadena res+FF por capa (SIN sdpa): att ya calculada +
+        residuo ponderado, GUARDAR vector crudo, despues su FF.
         """
         m = self.m
         H = m.blocks[0].attn.num_heads
@@ -77,8 +76,9 @@ class QFirst:
         dev = tok_id.device
         e = m.embeddings(tok_id)  # (1,1,D)
 
-        # 1) Primera Q + atencion por capa (sin batch). No guarda nada.
+        # Pasada 1: Q+att por capa al inicio, sin FF, sin guardar.
         A_all = []
+        n_a = []
         for li, blk in enumerate(m.blocks):
             attn = blk.attn
             u = blk.ln_1(e)
@@ -99,27 +99,23 @@ class QFirst:
             k = repeat_kv(K_full, H, G).transpose(1, 2)
             v = repeat_kv(V_full, H, G).transpose(1, 2)
             out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
-            A_all.append(attn.o_proj(out.transpose(1, 2).contiguous().view(1, 1, -1)))
+            A = attn.o_proj(out.transpose(1, 2).contiguous().view(1, 1, -1))
+            n_a.append(float(A.norm()))
+            A_all.append(A)
 
-        # 2) Cadena por capa: capa 1 arranca en A_1 (SIN residuo: no hay
-        # FF previo); resto: su att + residuo anterior. GUARDAR ese vector.
-        s = None
+        # Pasada 2: cadena res+FF (SIN sdpa), guardando vector crudo.
+        s_prev = None
         new_caches = []
         for li, blk in enumerate(m.blocks):
             A = A_all[li]
-            s = A if li == 0 else (1 - ATT_W) * s + ATT_W * A
+            s = A if li == 0 else (1 - ATT_W) * s_prev + ATT_W * A
             new_caches.append(torch.cat([caches[li], s.clone()], dim=1))
-            s = s + blk.mlp(blk.ln_2(s))
-        logits = m.lm_head(m.norm_f(s))
+            s_prev = s + blk.mlp(blk.ln_2(s))
+        logits = m.lm_head(m.norm_f(s_prev))
         if not torch.isfinite(logits).all():
-            bad_a = [li for li, a in enumerate(A_all) if not torch.isfinite(a).all()]
-            bad_c = [li for li, c in enumerate(new_caches) if not torch.isfinite(c).all()]
             print(f"  [qfirst] logits no-finitos offset={offset} "
-                  f"max|logits|={float(logits.abs().max())} A_malas={bad_a} C_malas={bad_c}")
-            ma = [float(a.abs().max()) for a in A_all]
-            mc = [float(caches[li].abs().max()) for li in range(len(caches))]
-            print(f"  [qfirst] |A|={[f'{v:.1g}' for v in ma]}")
-            print(f"  [qfirst] |C_in|={[f'{v:.1g}' for v in mc]}")
+                  f"max|logits|={float(logits.abs().max())} "
+                  f"|A|={[f'{v:.1g}' for v in n_a]}")
         return logits, new_caches
 
     @torch.no_grad()
@@ -131,8 +127,9 @@ class QFirst:
         h0 = m.embeddings(input_ids)
         B, P, D = h0.shape
 
-        # ── Fase A: UNICO calculo de Q/K/V/att por capa (16 sdpa) ──
-        self.a_q = []
+        # Pasada 1: cada capa hace Q+att AL INICIO, sin FF, sin guardar.
+        A_all = []
+        n_a = []
         for blk in m.blocks:
             attn = blk.attn
             u = blk.ln_1(h0)
@@ -141,24 +138,20 @@ class QFirst:
             V0 = attn.v_proj(u).view(B, P, G, Hd)
             Qr, Kr = attn.rope(Q, K0, 0)
             A = attn.o_proj(self._sdpa_prompt(attn, Qr, Kr, V0))
-            self.a_q.append(A)
-
-        # ── Fase B: cadena con atenciones YA calculadas (SIN recomputo) ──
-        # capa 1 arranca en A_1 (sin residuo); resto: att + residuo previo.
-        s = None
-        caches = []
-        n_a = []
-        for li, blk in enumerate(m.blocks):
-            A = self.a_q[li]
             n_a.append(float(A.norm()))
-            self.a_q[li] = None  # usado/borrado
-            s = A if li == 0 else (1 - ATT_W) * s + ATT_W * A
-            caches.append(s.clone())  # vector crudo (att+res) como tokens
-            s = s + blk.mlp(blk.ln_2(s))
+            A_all.append(A)
 
-        self.a_q = []  # todos los vectores usados/borrados
+        # Pasada 2: cadena res+FF (SIN sdpa). Capa 1 sin residuo previo.
+        s_prev = None
+        caches = []
+        for li, blk in enumerate(m.blocks):
+            A = A_all[li]
+            s = A if li == 0 else (1 - ATT_W) * s_prev + ATT_W * A
+            caches.append(s.clone())  # vector crudo (att+res) como tokens
+            s_prev = s + blk.mlp(blk.ln_2(s))
+
         self.diag = {"norm_a": n_a}
-        logits = m.lm_head(m.norm_f(s))
+        logits = m.lm_head(m.norm_f(s_prev))
         if not torch.isfinite(logits).all():
             print(f"  [qfirst] prefill no-finito max|logits|={float(logits.abs().max())}")
         return logits, caches

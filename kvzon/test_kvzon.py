@@ -82,11 +82,12 @@ class TestKvzon(unittest.TestCase):
             # cache cruda: vectores (att+res) dim D, un token por posicion
             self.assertEqual(tuple(c.shape), (1, P, 768))
 
-    def test_vectores_borrados(self):
+    def test_sin_vectores_colgados(self):
         qf = QFirst(self.model)
         with torch.no_grad():
             qf.prefill(self.x)
-        self.assertEqual(qf.a_q, [])
+        self.assertFalse(hasattr(qf, "a_q"))
+        self.assertFalse(hasattr(qf, "q_saved"))
         self.assertEqual(len(qf.diag["norm_a"]), 16)
 
     def test_decode_atencion_unica(self):
