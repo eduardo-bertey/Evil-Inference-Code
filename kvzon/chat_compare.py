@@ -32,6 +32,10 @@ import torch.nn.functional as F
 from model import LLM, Config, repeat_kv
 from tokenizers import Tokenizer
 
+# Peso de att en la suma att+res (convexa: res lleva 1-ATT_W).
+# Capa 1 sin cambios (no tiene residuo previo).
+ATT_W = 0.5
+
 
 # ─── Q-first prefill ─────────────────────────────────────────────────────────
 class QFirst:
@@ -103,7 +107,7 @@ class QFirst:
         new_caches = []
         for li, blk in enumerate(m.blocks):
             A = A_all[li]
-            s = A if li == 0 else s + A
+            s = A if li == 0 else (1 - ATT_W) * s + ATT_W * A
             new_caches.append(torch.cat([caches[li], s.clone()], dim=1))
             s = s + blk.mlp(blk.ln_2(s))
         logits = m.lm_head(m.norm_f(s))
@@ -112,6 +116,10 @@ class QFirst:
             bad_c = [li for li, c in enumerate(new_caches) if not torch.isfinite(c).all()]
             print(f"  [qfirst] logits no-finitos offset={offset} "
                   f"max|logits|={float(logits.abs().max())} A_malas={bad_a} C_malas={bad_c}")
+            ma = [float(a.abs().max()) for a in A_all]
+            mc = [float(caches[li].abs().max()) for li in range(len(caches))]
+            print(f"  [qfirst] |A|={[f'{v:.1g}' for v in ma]}")
+            print(f"  [qfirst] |C_in|={[f'{v:.1g}' for v in mc]}")
         return logits, new_caches
 
     @torch.no_grad()
@@ -144,7 +152,7 @@ class QFirst:
             A = self.a_q[li]
             n_a.append(float(A.norm()))
             self.a_q[li] = None  # usado/borrado
-            s = A if li == 0 else s + A
+            s = A if li == 0 else (1 - ATT_W) * s + ATT_W * A
             caches.append(s.clone())  # vector crudo (att+res) como tokens
             s = s + blk.mlp(blk.ln_2(s))
 
