@@ -8,7 +8,9 @@ Modificado (Q-first, diseno aprobado):
           ya calculada + residual (Q' = Q + q_proj(dh), lineal = recomputo),
           KV verdaderas del stream real -> vector a^{Q+res} que va a la cache
           (cada cache distinta). Luego FF + residual, igual que vanilla.
-  Decode: identico al vanilla sobre esas caches.
+  Decode (atencion-unica, sin re-prefill): por token nuevo, las 16 Q +
+  K/V salen del entry stream en una sola operacion (1 sdpa batch=16);
+  despues solo corre la cadena FF con residuales; append a cada cache.
 
 Comandos:
   /temp <f> /topk <i> /topp <f> /rep <f> /ctx <i> /length <i>
@@ -53,7 +55,68 @@ class QFirst:
         return out.transpose(1, 2).contiguous().view(B, P, D)
 
     @torch.no_grad()
-    def prefill(self, input_ids):
+    def decode_step(self, tok_id, caches, offset):
+        """Un token: TODA la atencion de una sola vez con la primera Q.
+
+        1) Entry stream e. Las 16 Q (una por capa) + K/V nuevos se calculan
+           juntos; UN solo sdpa batch=16 capas sobre cache+posicion nueva.
+        2) Despues solo corre la cadena FF con residuales (sin mas atencion).
+        3) Append de K/V nuevos a cada cache (distinta por capa).
+        """
+        m = self.m
+        H = m.blocks[0].attn.num_heads
+        G = m.blocks[0].attn.num_kv_groups
+        Hd = m.config.dim // H
+        dev = tok_id.device
+        e = m.embeddings(tok_id)  # (1,1,D)
+
+        # 1) Primera Q + K/V de las 16 capas, todo junto
+        Qs, Kn, Vn = [], [], []
+        for blk in m.blocks:
+            attn = blk.attn
+            u = blk.ln_1(e)
+            Qs.append(attn.q_proj(u).view(H, 1, Hd))
+            Kn.append(attn.k_proj(u).view(G, 1, Hd))
+            Vn.append(attn.v_proj(u).view(G, 1, Hd))
+        Q = torch.cat(Qs, dim=0).unsqueeze(0)     # (1,16,H,1,Hd)
+        rope0 = m.blocks[0].attn.rope
+        Qf = Q.view(16, 1, H, Hd)
+        Qr, _ = rope0(Qf, torch.zeros(16, 1, G, Hd, device=dev), offset)
+        Qr = Qr.view(16, H, 1, Hd)
+        Kr_list = []
+        for li, blk in enumerate(m.blocks):
+            _, kr = blk.attn.rope(Qf[li:li + 1] * 0, Kn[li].unsqueeze(0), offset)
+            Kr_list.append(kr.squeeze(0))
+        Kr = torch.stack(Kr_list).unsqueeze(0)    # (1,16,G,1,Hd)
+        V = torch.stack(Vn, dim=0).unsqueeze(0)   # (1,16,G,1,Hd)
+        Kc = torch.stack([c[0].squeeze(0) for c in caches], dim=0).unsqueeze(0)
+        Vc = torch.stack([c[1].squeeze(0) for c in caches], dim=0).unsqueeze(0)
+        K_full = torch.cat([Kc, Kr], dim=3)       # (1,16,G,O+1,Hd)
+        V_full = torch.cat([Vc, V], dim=3)
+        B, L, _, S, _ = K_full.shape
+        Ke = K_full.expand(B, L, H, S, Hd).reshape(B * L * H, S, Hd)
+        Ve = V_full.expand(B, L, H, S, Hd).reshape(B * L * H, S, Hd)
+        Qe = Qr.reshape(B * L * H, 1, Hd)
+        # UN solo sdpa para las 16 capas:
+        Ao = F.scaled_dot_product_attention(Qe, Ke, Ve, is_causal=False)
+        Ao = Ao.view(B, L, H, 1, Hd).squeeze(3).transpose(1, 2).reshape(B, L, -1)
+        A_all = [m.blocks[li].attn.o_proj(Ao[:, li, :].unsqueeze(1))
+                 for li in range(len(m.blocks))]
+
+        # 2) Cadena FF con residuales (sin atencion)
+        new_caches = []
+        for li, blk in enumerate(m.blocks):
+            Kc_li, Vc_li = caches[li]
+            new_caches.append((
+                torch.cat([Kc_li, Kr_list[li].unsqueeze(0)], dim=1).clone(),
+                torch.cat([Vc_li, Vn[li].unsqueeze(0)], dim=1).clone(),
+            ))
+        s = e
+        for li, blk in enumerate(m.blocks):
+            s = s + A_all[li]
+            s = s + blk.mlp(blk.ln_2(s))
+        logits = m.lm_head(m.norm_f(s))
+        return logits, new_caches
         m = self.m
         H = m.blocks[0].attn.num_heads
         G = m.blocks[0].attn.num_kv_groups
@@ -181,16 +244,31 @@ def generate_vanilla(model, input_ids, max_new, temperature, top_k, top_p,
 @torch.no_grad()
 def generate_qfirst(qf, input_ids, max_new, temperature, top_k, top_p,
                     repetition_penalty, eos_token_id):
-    """Prefill Q-first + mismo decode."""
+    """Q-first FIJO: 1 prefill Q-first + N decode_step con atencion-unica.
+    Sin re-prefill por token: 50 tokens = 1 prefill + 50 steps baratos."""
     prompt_len = input_ids.shape[1]
     t0 = time.perf_counter()
     logits, caches = qf.prefill(input_ids)
     prefill_tps = prompt_len / max(time.perf_counter() - t0, 1e-9)
     prefill_logits = logits.float().cpu()
-    out_ids, step_logits, decode_tps = _decode(
-        qf.m, input_ids, caches, logits, prompt_len, max_new, temperature,
-        top_k, top_p, repetition_penalty, eos_token_id)
-    return out_ids, prefill_logits, step_logits, prefill_tps, decode_tps
+    step_logits = []
+    t1 = time.perf_counter()
+    offset = prompt_len
+    for gen_i in range(max_new):
+        logits_last = _sample_next(logits[:, -1, :].clone(), temperature, top_k, top_p)
+        logits_last = _apply_rep_penalty(logits_last, input_ids, repetition_penalty)
+        logits_last = _apply_topk_topp(logits_last, top_k, top_p)
+        probs = torch.softmax(logits_last, dim=-1)
+        next_tok = torch.multinomial(probs, num_samples=1)
+        if eos_token_id is not None and next_tok.item() == eos_token_id:
+            break
+        input_ids = torch.cat([input_ids, next_tok], dim=1)
+        logits, caches = qf.decode_step(next_tok, caches, offset)
+        offset += 1
+        step_logits.append(logits[:, -1, :].float().cpu())
+    dt = time.perf_counter() - t1
+    n_gen = len(step_logits)
+    return input_ids, prefill_logits, step_logits, prefill_tps, (n_gen / dt if dt > 0 else 0.0)
 
 
 def compare_steps(logits_a, logits_b):
@@ -303,8 +381,9 @@ def main():
         if mode == "ambos":
             (o1, p1, s1, _, _, _), (o2, p2, s2, _, _, _) = \
                 results["vanilla"], results["qfirst"]
-            n = min(p1.shape[1], p2.shape[1])
-            dp = float((p1[:, :n, :] - p2[:, :n, :]).abs().max())
+            # Vanilla prefill = solo ultimo token (1,1,V); Q-first = prompt
+            # completo (1,P,V): comparar ultima posicion contra ultima.
+            dp = float((p1[:, -1, :] - p2[:, -1, :]).abs().max())
             maxd, first_div = compare_steps(s1, s2)
             print(f"prefill max|dlogits|={dp:.3g} | decode max|dlogits|={maxd:.3g} | "
                   f"primer token divergente: {first_div}")
