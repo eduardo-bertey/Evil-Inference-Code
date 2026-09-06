@@ -101,23 +101,23 @@ class QFirst:
         A_all = [m.blocks[li].attn.o_proj(Ao16[:, li, :].unsqueeze(1))
                  for li in range(len(m.blocks))]
 
-        # 2) Cadena FF con residuales (sin atencion). Lo que se GUARDA en
-        # cada cache sale del stream con residual del FF (no del pase Q).
+        # 2) Cadena por capa: atencion (ya calculada 1 vez) + FF,
+        # GUARDAR 1 vez DESPUES del FF, del stream post-FF con residuo.
         s = e
         new_caches = []
         for li, blk in enumerate(m.blocks):
             attn = blk.attn
-            uh_s = blk.ln_1(s)
-            K_s = attn.k_proj(uh_s).view(1, 1, G, Hd)
-            V_s = attn.v_proj(uh_s).view(1, 1, G, Hd)
+            s = s + A_all[li]
+            s = s + blk.mlp(blk.ln_2(s))
+            uh_post = blk.ln_1(s)
+            K_s = attn.k_proj(uh_post).view(1, 1, G, Hd)
+            V_s = attn.v_proj(uh_post).view(1, 1, G, Hd)
             _, Kr_s = attn.rope(torch.zeros(1, 1, H, Hd, device=dev), K_s, offset)
             Kc_li, Vc_li = caches[li]
             new_caches.append((
                 torch.cat([Kc_li, Kr_s], dim=1).clone(),
                 torch.cat([Vc_li, V_s], dim=1).clone(),
             ))
-            s = s + A_all[li]
-            s = s + blk.mlp(blk.ln_2(s))
         logits = m.lm_head(m.norm_f(s))
         return logits, new_caches
 
