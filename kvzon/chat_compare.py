@@ -70,37 +70,34 @@ class QFirst:
         dev = tok_id.device
         e = m.embeddings(tok_id)  # (1,1,D)
 
-        # 1) Primera Q + K/V de las 16 capas, todo junto
+        # 1) Primera Q + K/V de las 16 capas, todo junto.
+        # Layouts con batch: Qf (16,1,H,Hd), Kf/Vf (16,1,G,Hd).
         Qs, Kn, Vn = [], [], []
         for blk in m.blocks:
             attn = blk.attn
             u = blk.ln_1(e)
-            Qs.append(attn.q_proj(u).view(H, 1, Hd))
-            Kn.append(attn.k_proj(u).view(G, 1, Hd))
-            Vn.append(attn.v_proj(u).view(G, 1, Hd))
-        Q = torch.cat(Qs, dim=0).unsqueeze(0)     # (1,16,H,1,Hd)
+            Qs.append(attn.q_proj(u))   # (1,1,D)
+            Kn.append(attn.k_proj(u))   # (1,1,G*Hd)
+            Vn.append(attn.v_proj(u))
+        Qf = torch.cat(Qs, dim=0).view(16, 1, H, Hd)
+        Kf = torch.cat(Kn, dim=0).view(16, 1, G, Hd)
+        Vf = torch.cat(Vn, dim=0).view(16, 1, G, Hd)
         rope0 = m.blocks[0].attn.rope
-        Qf = Q.view(16, 1, H, Hd)
         Qr, _ = rope0(Qf, torch.zeros(16, 1, G, Hd, device=dev), offset)
-        Qr = Qr.view(16, H, 1, Hd)
-        Kr_list = []
-        for li, blk in enumerate(m.blocks):
-            _, kr = blk.attn.rope(Qf[li:li + 1] * 0, Kn[li].unsqueeze(0), offset)
-            Kr_list.append(kr.squeeze(0))
-        Kr = torch.stack(Kr_list).unsqueeze(0)    # (1,16,G,1,Hd)
-        V = torch.stack(Vn, dim=0).unsqueeze(0)   # (1,16,G,1,Hd)
+        _, Kr = rope0(Qf * 0, Kf, offset)
+        # Caches: (1,S,G,Hd) por capa -> stack (1,16,S,G,Hd); S en dim 2.
         Kc = torch.stack([c[0].squeeze(0) for c in caches], dim=0).unsqueeze(0)
         Vc = torch.stack([c[1].squeeze(0) for c in caches], dim=0).unsqueeze(0)
-        K_full = torch.cat([Kc, Kr], dim=3)       # (1,16,G,O+1,Hd)
-        V_full = torch.cat([Vc, V], dim=3)
-        B, L, _, S, _ = K_full.shape
-        Ke = K_full.expand(B, L, H, S, Hd).reshape(B * L * H, S, Hd)
-        Ve = V_full.expand(B, L, H, S, Hd).reshape(B * L * H, S, Hd)
-        Qe = Qr.reshape(B * L * H, 1, Hd)
+        K_full = torch.cat([Kc, Kr.view(1, 16, 1, G, Hd)], dim=2)  # (1,16,O+1,G,Hd)
+        V_full = torch.cat([Vc, Vf.view(1, 16, 1, G, Hd)], dim=2)
+        B, L, S, _, _ = K_full.shape
+        Ke = K_full.repeat_interleave(H // G, dim=3).transpose(2, 3).reshape(B * L * H, S, Hd)
+        Ve = V_full.repeat_interleave(H // G, dim=3).transpose(2, 3).reshape(B * L * H, S, Hd)
+        Qe = Qr.transpose(1, 2).reshape(B * L * H, 1, Hd)
         # UN solo sdpa para las 16 capas:
         Ao = F.scaled_dot_product_attention(Qe, Ke, Ve, is_causal=False)
-        Ao = Ao.view(B, L, H, 1, Hd).squeeze(3).transpose(1, 2).reshape(B, L, -1)
-        A_all = [m.blocks[li].attn.o_proj(Ao[:, li, :].unsqueeze(1))
+        Ao16 = Ao.view(B, L, H, Hd).transpose(1, 2).reshape(B, L, -1)
+        A_all = [m.blocks[li].attn.o_proj(Ao16[:, li, :].unsqueeze(1))
                  for li in range(len(m.blocks))]
 
         # 2) Cadena FF con residuales (sin atencion)
@@ -108,8 +105,8 @@ class QFirst:
         for li, blk in enumerate(m.blocks):
             Kc_li, Vc_li = caches[li]
             new_caches.append((
-                torch.cat([Kc_li, Kr_list[li].unsqueeze(0)], dim=1).clone(),
-                torch.cat([Vc_li, Vn[li].unsqueeze(0)], dim=1).clone(),
+                torch.cat([Kc_li, Kr[li].unsqueeze(0)], dim=1).clone(),
+                torch.cat([Vc_li, Vf[li].unsqueeze(0)], dim=1).clone(),
             ))
         s = e
         for li, blk in enumerate(m.blocks):
