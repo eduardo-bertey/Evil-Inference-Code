@@ -267,10 +267,11 @@ class TransformerLM(nn.Module):
         input_ids: torch.Tensor,
         offset: int,
         caches: list[KVCache | None],
+        width=None,
     ) -> tuple[torch.Tensor, list[KVCache]]:
         """Forward with KV cache for autoregressive generation."""
         x = self.embedding(input_ids)
-        x, new_caches = self.transformer.forward_with_cache(x, offset, caches)
+        x, new_caches = self.transformer.forward_with_cache(x, offset, caches, width)
         return self.head(x), new_caches
 
     def forward_with_cache_partial(
@@ -279,6 +280,7 @@ class TransformerLM(nn.Module):
         offset: int,
         caches: list[KVCache | None],
         rotary_pct: float = 0.5,
+        width=None,
     ) -> tuple[torch.Tensor, list[KVCache]]:
         """Forward with KV cache + partial RoPE."""
         x = self.embedding(input_ids)
@@ -344,7 +346,10 @@ class TransformerLM(nn.Module):
 
             residual = h
             h_norm = layer.ffn_norm(h)
-            ffn_out = layer.ffn(h_norm)
+            if layer.use_moe:
+                ffn_out = layer.ffn(h_norm, width)
+            else:
+                ffn_out = layer.ffn(h_norm)
             h_ffn = ffn_out[0] if isinstance(ffn_out, tuple) else ffn_out
             h = residual + h_ffn
 
@@ -415,12 +420,14 @@ class TransformerLM(nn.Module):
         repetition_penalty: float = 1.1,
         use_partial_rope: bool = False,
         rotary_pct: float = 0.5,
+        width=None,
     ) -> torch.Tensor:
         """Autoregressive text generation with KV cache.
 
         Args:
             input_ids: (batch, prompt_len)
             max_new_tokens: number of tokens to generate
+            width: ancho MoSE forzado (None = router libre, inferencia)
         Returns:
             (batch, prompt_len + max_new_tokens)
         """
@@ -441,11 +448,11 @@ class TransformerLM(nn.Module):
         prompt_len = generated.shape[1]
         if use_partial_rope:
             logits, caches = self.forward_with_cache_partial(
-                generated, 0, caches, rotary_pct
+                generated, 0, caches, rotary_pct, width
             )
         else:
             logits, caches = self.forward_with_cache(
-                generated, 0, caches
+                generated, 0, caches, width
             )
         offset = prompt_len
 
@@ -485,11 +492,11 @@ class TransformerLM(nn.Module):
             # Forwardea solo el token nuevo en su posicion absoluta.
             if use_partial_rope:
                 logits, caches = self.forward_with_cache_partial(
-                    generated[:, -1:], offset, caches, rotary_pct
+                    generated[:, -1:], offset, caches, rotary_pct, width
                 )
             else:
                 logits, caches = self.forward_with_cache(
-                    generated[:, -1:], offset, caches
+                    generated[:, -1:], offset, caches, width
                 )
             offset += 1
 

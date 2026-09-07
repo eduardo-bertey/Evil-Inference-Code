@@ -23,11 +23,12 @@ class BPEWrapper:
 
 
 @torch.no_grad()
-def generate_sample(model, tokenizer, device, prompt="hola", max_new=30):
+def generate_sample(model, tokenizer, device, prompt="hola", max_new=30, width=None):
     model.eval()
     x = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
     out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40, top_p=0.9,
-                         repetition_penalty=1.2, use_partial_rope=use_partial_rope, rotary_pct=rotary_pct)
+                         repetition_penalty=1.2, use_partial_rope=use_partial_rope, rotary_pct=rotary_pct,
+                         width=width)
     model.train()
     return tokenizer.decode(out[0].tolist())
 
@@ -228,10 +229,12 @@ def main():
             loaded = True
 
         if loaded:
-            print("\n── Generation test ──")
+            print("\n── Generation test (MoSE anchos) ──")
+            modes = [(None, "libre"), (1.0, "full"), (0.75, "75%"), (0.50, "50%")]
             for p in ["hola", "que es la inteligencia artificial", "en un lugar de la mancha", "hoy hace mucho calor"]:
-                sample = generate_sample(model, tokenizer, device, prompt=p, max_new=50)
-                print(f"  [{p}] → {sample}")
+                for w, tag in modes:
+                    sample = generate_sample(model, tokenizer, device, prompt=p, max_new=50, width=w)
+                    print(f"  [{p}][{tag}] → {sample}")
             print("── End test ──\n")
 
     # ── Data ────────────────────────────────────────────────────────────────

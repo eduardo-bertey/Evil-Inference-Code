@@ -150,7 +150,7 @@ class LayerWithMoE(nn.Module):
             x = self.post_ffn_norm(x)
         return x, aux_loss
 
-    def forward_with_cache(self, x, offset, cache):
+    def forward_with_cache(self, x, offset, cache, width=None):
         residual = x
         h = self.attn_norm(x)
         h, new_cache = self.attention.forward_with_cache(h, offset, cache)
@@ -162,7 +162,7 @@ class LayerWithMoE(nn.Module):
         residual = x
         h = self.ffn_norm(x)
         if self.use_moe:
-            h, aux_loss = self.ffn(h)
+            h, aux_loss = self.ffn(h, width)
         else:
             h = self.ffn(h)
         h = self.residual_dropout(h)
@@ -265,9 +265,9 @@ class MoETransformer(nn.Module):
             aux_losses.append(aux)
         return self.final_norm(x), sum(aux_losses)
 
-    def forward_with_cache(self, x, offset, caches):
+    def forward_with_cache(self, x, offset, caches, width=None):
         new_caches = []
         for layer, cache in zip(self.layers, caches):
-            x, new_cache = layer.forward_with_cache(x, offset, cache)
+            x, new_cache = layer.forward_with_cache(x, offset, cache, width)
             new_caches.append(new_cache)
         return self.final_norm(x), new_caches
