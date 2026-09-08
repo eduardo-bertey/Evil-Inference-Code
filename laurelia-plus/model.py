@@ -38,6 +38,7 @@ class Config:
     mose_tau = 1.0      # temperatura Gumbel-ST en train
     mose_noise_std = 0.01  # ruido gaussiano en logits (como moe-plus)
     mose_z_gamma = 0.001   # z-loss en logits (como moe-plus)
+    mose_balance_w = 0.01  # balanceo uniforme entre anchos (como moe-plus)
 
     batch_size: int = 6
     grad_acc: int = 6
@@ -254,6 +255,7 @@ class WidthRouter(nn.Module):
         self.tau = getattr(config, "mose_tau", 1.0)
         self.noise_std = getattr(config, "mose_noise_std", 0.01)
         self.z_gamma = getattr(config, "mose_z_gamma", 0.001)
+        self.balance_w = getattr(config, "mose_balance_w", 0.01)
         self.proj = nn.Linear(config.dim, len(self.widths), bias=True)
         self.last_idx = 0  # último ancho elegido (para log)
 
@@ -281,6 +283,11 @@ class WidthRouter(nn.Module):
         scale = (y @ wvec) / width if self.training else None
         z = torch.logsumexp(logits, dim=-1).pow(2).mean()  # z-loss (moe-plus)
         aux = self.cost_w * (probs @ wvec) + self.z_gamma * z
+        if self.training:
+            # Balanceo uniforme estilo moe-plus: densidad (one-hot sample) x
+            # probabilidad media. Castiga el colapso a un solo ancho.
+            n = probs.shape[-1]
+            aux = aux + self.balance_w * n * (y_hard.float() * probs).sum()
         return width, scale, aux
 
 
