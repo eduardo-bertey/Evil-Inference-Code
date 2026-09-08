@@ -31,7 +31,6 @@ class Config:
     mla_d_c = 128
     mla_d_c1 = 128
     mla_d_rotate = 64
-    attn_logit_cap = 30.0
 
     # MoSE (router de ancho por capa, sin MoE)
     mose_widths = (1.0, 0.75, 0.50, 0.25)
@@ -44,12 +43,6 @@ class Config:
     weight_decay: float = 0.1
     betas: tuple = (0.9, 0.95)
     warm_up: int = 50
-
-
-def repeat_kv(x, num_heads, num_kv_groups):
-    if num_kv_groups == num_heads:
-        return x
-    return x.repeat_interleave(num_heads // num_kv_groups, dim=2)
 
 
 # ─── MLA (port de moe-plus/mla_attention.py) ─────────────────────────────
@@ -121,7 +114,6 @@ class MLAAttention(nn.Module):
         self.head_dim = head_dim
         self.d_rotate = config.mla_d_rotate
         self.causal = True
-        self.attn_logit_cap = getattr(config, "attn_logit_cap", 30.0)
         max_seq_len = config.block_size
 
         self.qkv = QKVProjectionMLA(
@@ -133,55 +125,34 @@ class MLAAttention(nn.Module):
         self.rope = RoPE(head_dim=self.d_rotate, max_seq_len=max_seq_len,
                          base=10000.0, rotary_pct=1.0)
         self.attn_dropout = nn.Dropout(config.drop)
+        # Una sola escala para el dot concatenado (contenido manda).
+        self.scale = 1.0 / math.sqrt(config.mla_d_c)
 
-        mask = torch.triu(torch.full((max_seq_len, max_seq_len), float("-inf")), diagonal=1)
-        self.register_buffer("causal_mask", mask, persistent=False)
+    def _cat_qkv(self, Q_state, Q_rot, K_state, K_rot, V_state):
+        """Concatena contenido+rope: q@k.T = qc@kc.T + qr@kr.T en un solo SDPA.
 
-    def _scores(self, Q_state, Q_rot, K_state, K_rot, seq_len, kv_len=None, causal=True, q_off=0):
-        """Decoupled content/sqrt(d_c) + rope (QK-norm: rope sin escala extra).
-
-        q_off: posición global de la primera query (para chunks: máscara j<=q_off+r).
+        q: (B,H,T,hd+dr), k: (B,G,S,hd+dr) [K_rot compartido expandido a G],
+        v: (B,G,S,hd). SDPA hace GQA solo (H=12, G=4).
         """
-        scale_c = 1.0 / math.sqrt(self.qkv.d_c)
-        k_c = repeat_kv(K_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
-        q_c = Q_state.transpose(1, 2)
-        s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) * scale_c
+        q = torch.cat([Q_state, Q_rot], dim=-1).transpose(1, 2)
+        nkv = K_state.shape[2]
+        k = torch.cat([K_state, K_rot.expand(-1, -1, nkv, -1)], dim=-1).transpose(1, 2)
+        v = V_state.transpose(1, 2)
+        return q, k, v
 
-        q_r = Q_rot.transpose(1, 2)
-        k_r = K_rot.transpose(1, 2).expand(-1, self.num_heads, -1, -1)
-        s_r = torch.matmul(q_r, k_r.transpose(-2, -1))
-
-        scores = s_c + s_r
-        if self.attn_logit_cap is not None:
-            scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
-
-        if causal:
-            if kv_len is None:
-                kv_len = K_state.shape[1]
-            if seq_len > 1:
-                if seq_len == kv_len and seq_len <= self.causal_mask.shape[0]:
-                    scores = scores + self.causal_mask[:seq_len, :seq_len]
-                else:
-                    mask = torch.triu(
-                        torch.full((seq_len, kv_len), float("-inf"), device=scores.device),
-                        diagonal=q_off + 1)
-                    scores = scores + mask
-        return scores
-
-    def _attend(self, Q_state, Q_rot, K_state, V_state, K_rot, q_len, kv_len, causal):
-        Q_state = self.q_norm(Q_state)
-        K_state = self.k_norm(K_state)
-        scores = self._scores(Q_state, Q_rot, K_state, K_rot, q_len, kv_len, causal)
-        attn_w = F.softmax(scores, dim=-1)
-        attn_w = self.attn_dropout(attn_w)
-        v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
-        return torch.matmul(attn_w, v).transpose(1, 2)  # (B, T, nh, hd)
+    def _sdpa(self, q, k, v, is_causal):
+        return F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=is_causal, scale=self.scale)
 
     def forward(self, x):
         Q_state, Q_rotate, K, V, K_rotate = self.qkv(x)
         Q_rotate, K_rotate = self.rope(Q_rotate, K_rotate, 0)
-        T = x.shape[1]
-        out = self._attend(Q_state, Q_rotate, K, V, K_rotate, T, T, True)
+        Q_state = self.q_norm(Q_state)
+        K = self.k_norm(K)
+        q, k, v = self._cat_qkv(Q_state, Q_rotate, K, K_rotate, V)
+        out = self._sdpa(q, k, v, True).transpose(1, 2)  # (B, T, nh, hd)
         return self.o_proj(out)
 
     def forward_with_cache(self, x, offset, cache):
@@ -215,8 +186,11 @@ class MLAAttention(nn.Module):
 
         K_rot = self.rope.apply_single(K_rot_full.unsqueeze(2), offset=0)
 
-        out = self._attend(Q_state, Q_rot, K_state, V_state, K_rot,
-                           S_new, S_full, S_new > 1)
+        Q_state = self.q_norm(Q_state)
+        K_state = self.k_norm(K_state)
+        q, k, v = self._cat_qkv(Q_state, Q_rot, K_state, K_rot, V_state)
+        # S_new==1: una query ve todo lo cacheado (pasado). S_new>1: causal.
+        out = self._sdpa(q, k, v, S_new > 1).transpose(1, 2)
         return self.o_proj(out), (C_KV_full, K_rot_full)
 
 
