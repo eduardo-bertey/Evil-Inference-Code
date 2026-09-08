@@ -160,7 +160,6 @@ def main():
                 sample = generate_sample(model, tokenizer, device, prompt=p, max_new=50)
                 print(f"  [{p}] → {sample}")
             print(f"  Widths router (full/75/50/25): {model.width_report()}")
-            print(f"  Router por capa: {' '.join(model.width_detail())}")
             print("── End test ──\n")
 
     if test_mode:
