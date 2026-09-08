@@ -408,6 +408,15 @@ class LLM(nn.Module):
             counts[b.router.last_idx] += 1
         return counts
 
+    def width_detail(self):
+        """Ancho elegido por cada capa, separado (L0..L15)."""
+        names = {1.0: "full", 0.75: "75", 0.50: "50", 0.25: "25"}
+        det = []
+        for i, b in enumerate(self.blocks):
+            w = self.config.mose_widths[b.router.last_idx]
+            det.append(f"L{i}:{names.get(w, w)}")
+        return det
+
     def forward_with_cache(self, input_ids, offset, caches, width=None):
         x = self.embeddings(input_ids)
         new_caches = []
