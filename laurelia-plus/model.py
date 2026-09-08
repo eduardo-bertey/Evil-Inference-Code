@@ -432,6 +432,15 @@ class LLM(nn.Module):
             counts[b.router.last_idx] += 1
         return counts
 
+    def width_detail(self):
+        """Ancho elegido por cada capa, separado (L0..L15)."""
+        names = {1.0: "full", 0.75: "75", 0.50: "50", 0.25: "25"}
+        det = []
+        for i, b in enumerate(self.blocks):
+            w = self.config.mose_widths[b.router.last_idx]
+            det.append(f"L{i}:{names.get(w, w)}")
+        return det
+
     def forward_with_cache(self, input_ids, offset, caches, width=None):
         x = self.embeddings(input_ids)
         new_caches = []
@@ -448,10 +457,18 @@ class LLM(nn.Module):
                  top_p=0.9, repetition_penalty=1.1, eos_token_id=None, width=None):
         caches = None
         prompt_len = input_ids.shape[1]
+        n_w = len(self.config.mose_widths)
+        gen_picks = [0] * n_w  # decisiones del router en toda la generación
+
+        def _tally():
+            for b in self.blocks:
+                gen_picks[b.router.last_idx] += 1
 
         for i in range(prompt_len):
             logits, caches = self.forward_with_cache(input_ids[:, i:i+1], i, caches, width)
+            _tally()
 
+        n_gen = 0
         for gen_i in range(max_new_tokens):
             logits_last = logits[:, -1, :] / temperature
 
@@ -481,5 +498,11 @@ class LLM(nn.Module):
 
             input_ids = torch.cat([input_ids, next_tok], dim=1)
             logits, caches = self.forward_with_cache(next_tok, prompt_len + gen_i, caches, width)
+            _tally()
+            n_gen += 1
 
+        toks = prompt_len + n_gen
+        tot = sum(gen_picks)
+        avg = sum(c * w for c, w in zip(gen_picks, self.config.mose_widths)) / max(tot, 1)
+        print(f"  [gen {toks} toks W{gen_picks} avg {avg:.0%}]")
         return input_ids
