@@ -141,20 +141,10 @@ class MLAAttention(nn.Module):
         return q, k, v
 
     def _sdpa(self, q, k, v, is_causal):
-        dp = self.attn_dropout.p if self.training else 0.0
-        H, G = q.shape[1], k.shape[1]
-        if H == G:
-            return F.scaled_dot_product_attention(
-                q, k, v, dropout_p=dp, is_causal=is_causal, scale=self.scale)
-        # GQA por grupos: un SDPA MHA por grupo (expand = vista, sin copia).
-        assert H % G == 0
-        outs = []
-        for i, qi in enumerate(q.chunk(G, dim=1)):
-            ki = k[:, i:i + 1].expand(-1, H // G, -1, -1)
-            vi = v[:, i:i + 1].expand(-1, H // G, -1, -1)
-            outs.append(F.scaled_dot_product_attention(
-                qi, ki, vi, dropout_p=dp, is_causal=is_causal, scale=self.scale))
-        return torch.cat(outs, dim=1)
+        return F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.attn_dropout.p if self.training else 0.0,
+            is_causal=is_causal, scale=self.scale, enable_gqa=True)
 
     def forward(self, x):
         Q_state, Q_rotate, K, V, K_rotate = self.qkv(x)
