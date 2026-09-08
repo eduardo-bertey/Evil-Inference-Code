@@ -28,11 +28,17 @@ class TSTConfig:
     mode="hard"    -> pesos bag completos hasta superposition_frac, luego CE estándar.
     """
     enabled: bool = False
-    n_predict: int = 3            # tamaño del bag (máx tokens futuros predichos)
+    n_predict: int = 4            # tamaño del bag (máx tokens futuros predichos)
     base: float = 0.5             # base geométrica: peso[k] ~ base**k antes de decaer
-    mode: str = "smooth"          # "smooth" | "hard"
+    mode: str = "fijo"            # "fijo" | "smooth" | "hard"
     superposition_frac: float = 0.3  # usado por "hard"
     recovery_frac: float = 1.0 / 3.0  # usado por "smooth"
+
+    def __post_init__(self):
+        if self.n_predict < 1:
+            raise ValueError("n_predict must be >= 1")
+        if self.mode not in ("fijo", "smooth", "hard"):
+            raise ValueError("mode must be 'fijo', 'smooth' or 'hard'")
 
     def __post_init__(self):
         if self.n_predict < 1:
@@ -48,9 +54,15 @@ class TSTConfig:
 def mtp_weights_for_step(cfg: TSTConfig, step: int, total_steps: int, device) -> Tensor:
     """Vector de pesos longitud `n_predict` para este step (longitud estática)."""
     P = cfg.n_predict
-    base_w = [cfg.base ** k for k in range(P)]  # ej. [1, 0.5, 0.25]
+    base_w = [cfg.base ** k for k in range(P)]  # ej. [1, 0.5, 0.25, 0.125]
     if not cfg.enabled or P == 1:
         w = [1.0] + [0.0] * (P - 1)
+        return torch.tensor(w, dtype=torch.float32, device=device)
+
+    if cfg.mode == "fijo":
+        # Pesos constantes todo el run, sin next-token (estilo paper):
+        # el CE clásico vive solo en la fase CE (recovery manual).
+        w = [0.0] + base_w[1:]
         return torch.tensor(w, dtype=torch.float32, device=device)
 
     progress = min(max(step / max(total_steps, 1), 0.0), 1.0)

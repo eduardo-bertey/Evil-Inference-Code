@@ -91,7 +91,7 @@ def main():
         prec = input("Precision (n=f32, b=bf16): ").strip().lower()
         dtype = torch.bfloat16 if prec == "b" else torch.float32
         tst_on = input("Habilitar TST? (s/n): ").strip().lower()
-        tst_cfg = TSTConfig(enabled=(tst_on == "s"))
+        tst_cfg = TSTConfig(enabled=(tst_on == "s"), n_predict=4, mode="fijo")
     print(f"  Compute: {dtype}")
     print(f"  TST: {'ON' if tst_cfg.enabled else 'OFF'} (n={tst_cfg.n_predict} base={tst_cfg.base} {tst_cfg.mode})")
 
