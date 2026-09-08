@@ -39,12 +39,6 @@ class TSTConfig:
             raise ValueError("n_predict must be >= 1")
         if self.mode not in ("fijo", "smooth", "hard"):
             raise ValueError("mode must be 'fijo', 'smooth' or 'hard'")
-
-    def __post_init__(self):
-        if self.n_predict < 1:
-            raise ValueError("n_predict must be >= 1")
-        if self.mode not in ("smooth", "hard"):
-            raise ValueError("mode must be 'smooth' or 'hard'")
         if not (0.0 < self.recovery_frac < 1.0):
             raise ValueError("recovery_frac must be in (0, 1)")
         if not (0.0 < self.superposition_frac < 1.0):
