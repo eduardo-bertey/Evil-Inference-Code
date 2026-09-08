@@ -145,16 +145,13 @@ class MLAAttention(nn.Module):
         scale_c = 1.0 / math.sqrt(self.qkv.d_c)
         k_c = repeat_kv(K_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
         q_c = Q_state.transpose(1, 2)
-        # Scores en bf16 (mitad de memoria que f32), softmax en f32.
-        use_amp = torch.cuda.is_available()
-        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
-            s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) * scale_c
+        s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) * scale_c
 
-            q_r = Q_rot.transpose(1, 2)
-            k_r = K_rot.transpose(1, 2).expand(-1, self.num_heads, -1, -1)
-            s_r = torch.matmul(q_r, k_r.transpose(-2, -1))
+        q_r = Q_rot.transpose(1, 2)
+        k_r = K_rot.transpose(1, 2).expand(-1, self.num_heads, -1, -1)
+        s_r = torch.matmul(q_r, k_r.transpose(-2, -1))
 
-            scores = (s_c + s_r).float()
+        scores = s_c + s_r
         if self.attn_logit_cap is not None:
             scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
 
