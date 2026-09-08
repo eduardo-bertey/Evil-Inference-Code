@@ -1,4 +1,4 @@
-"""Laurelia LLM Train — Dense GQA, basado en LLM_350M_DENSE.
+"""Laurelia Plus Train — Denso MLA + MoSE por router + TST opcional.
 
 bf16, streaming dataset, AdamW fused, WSD schedule, HF upload.
 """
@@ -9,6 +9,7 @@ _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
 from model import LLM, Config
+from tst import TSTConfig, mtp_weights_for_step
 import importlib
 train_data = importlib.import_module("train-data")
 from wikipedia import download_wikipedia_50mb
@@ -85,10 +86,14 @@ def main():
 
     if test_mode:
         dtype = torch.float32
+        tst_cfg = TSTConfig(enabled=False)
     else:
         prec = input("Precision (n=f32, b=bf16): ").strip().lower()
         dtype = torch.bfloat16 if prec == "b" else torch.float32
+        tst_on = input("Habilitar TST? (s/n): ").strip().lower()
+        tst_cfg = TSTConfig(enabled=(tst_on == "s"))
     print(f"  Compute: {dtype}")
+    print(f"  TST: {'ON' if tst_cfg.enabled else 'OFF'} (n={tst_cfg.n_predict} base={tst_cfg.base} {tst_cfg.mode})")
 
     tokenizer = None
     if os.path.exists(tok_path):
@@ -117,6 +122,8 @@ def main():
     step = 0
     epoch = 0
     ckpt_block = 0
+    tst_tokens = 0
+    dense_tokens = 0
 
     if not test_mode:
         loaded = False
@@ -127,9 +134,11 @@ def main():
             step = ckpt.get("step", 0)
             epoch = ckpt.get("epoch", 0)
             ckpt_block = ckpt.get("block", 0)
+            tst_tokens = ckpt.get("tst_tokens", 0)
+            dense_tokens = ckpt.get("dense_tokens", 0)
             del ckpt
             torch.cuda.empty_cache()
-            print(f"Loaded checkpoint: step {step} epoch {epoch} block {ckpt_block}")
+            print(f"Loaded checkpoint: step {step} epoch {epoch} block {ckpt_block} tst {tst_tokens:,} dense {dense_tokens:,}")
             loaded = True
         elif hf and hf.download_checkpoint(ckpt_path):
             ckpt = torch.load(ckpt_path, map_location='cpu')
@@ -138,9 +147,11 @@ def main():
             step = ckpt.get("step", 0)
             epoch = ckpt.get("epoch", 0)
             ckpt_block = ckpt.get("block", 0)
+            tst_tokens = ckpt.get("tst_tokens", 0)
+            dense_tokens = ckpt.get("dense_tokens", 0)
             del ckpt
             torch.cuda.empty_cache()
-            print(f"Loaded HF checkpoint: step {step} epoch {epoch} block {ckpt_block}")
+            print(f"Loaded HF checkpoint: step {step} epoch {epoch} block {ckpt_block} tst {tst_tokens:,} dense {dense_tokens:,}")
             loaded = True
 
         if loaded:
@@ -148,6 +159,7 @@ def main():
             for p in ["hola", "que es la inteligencia artificial", "en un lugar de la mancha"]:
                 sample = generate_sample(model, tokenizer, device, prompt=p, max_new=50)
                 print(f"  [{p}] → {sample}")
+            print(f"  Widths router (full/75/50/25): {model.width_report()}")
             print("── End test ──\n")
 
     if test_mode:
@@ -180,6 +192,10 @@ def main():
     head_p = model.lm_head.weight.numel()
     print(f"Params: emb={emb_p:,} + {config.layers}capas={layer_p:,} + norm={norm_p} = {emb_p + layer_p + norm_p:,}")
     print(f"dim={config.dim} lay={config.layers} heads={config.heads} kv={config.kv_groups} seq={seq_len} bs={config.batch_size} ga={config.grad_acc} lr={config.learning_rate}")
+    gqa_cpt = config.kv_groups * (config.dim // config.heads) * 2
+    mla_cpt = config.mla_d_c + config.mla_d_rotate
+    print(f"MLA: d_c={config.mla_d_c} d_c1={config.mla_d_c1} d_rot={config.mla_d_rotate} | cache: {gqa_cpt}→{mla_cpt}B/tok ({100*(1-mla_cpt/gqa_cpt):.0f}%)")
+    print(f"MoSE: anchos={config.mose_widths} cost_w={config.mose_cost_w} tau={config.mose_tau}")
     print(f"Tokens: {n:,}")
 
     model.train()
@@ -215,17 +231,23 @@ def main():
             x = torch.cat(x_list, dim=0)
             y = torch.cat(y_list, dim=0)
 
-            logits, loss = model(x, labels=y)
-            (loss / config.grad_acc).backward()
+            tok_n = x.numel()
+            mtp_w = None
+            if tst_cfg.enabled:
+                w = mtp_weights_for_step(tst_cfg, step, total_steps, x.device)
+                if w.numel() > 1 and float(w[1]) > 0.0:
+                    mtp_w = w
+                    tst_tokens += tok_n
+                    mtp_tag = f"mtp {[round(float(v), 3) for v in w.tolist()]}"
+                else:
+                    dense_tokens += tok_n
+                    mtp_tag = "CE"
+            else:
+                dense_tokens += tok_n
+                mtp_tag = ""
+            logits, loss, aux = model(x, labels=y, mtp_weights=mtp_w)
+            ((loss + aux) / config.grad_acc).backward()
             loss_val = loss.item()
-            aux_val = None
-            try:
-                a = getattr(model, "ultimo_aux", None)
-                if torch.is_tensor(a) and a.numel() == 1:
-                    v = float(a.detach().cpu().item())
-                    aux_val = v if v != 0.0 else None
-            except Exception:
-                pass
             del logits, loss
 
             if (batch_start // config.batch_size + 1) % config.grad_acc == 0 or batch_end >= n_seq:
@@ -241,10 +263,11 @@ def main():
                     now = time.time()
                     tok = (step - last_rpt_step) * config.batch_size * config.grad_acc * seq_len
                     tps = tok / max(now - last_rpt_time, 0.001)
-                    print(f"s{step} loss {loss_val:.4f} lr {lr_curr:.6f} grad {grad_norm:.3f} {tps:.0f}t/s")
+                    wr = model.width_report()
+                    print(f"s{step} loss {loss_val:.4f} lr {lr_curr:.6f} grad {grad_norm:.3f} {tps:.0f}t/s tst {tst_tokens/1e6:.1f}M/{dense_tokens/1e6:.1f}M W{wr} {mtp_tag}")
                     last_rpt_time = now
                     last_rpt_step = step
-                    pm.log(step, loss_val, lr_curr, tps, aux_loss=aux_val)
+                    pm.log(step, loss_val, lr_curr, tps)
 
                 if not test_mode and step % 50 == 0:
                     sample = generate_sample(model, tokenizer, device)
@@ -253,7 +276,8 @@ def main():
                 if not test_mode and pusher and (time.time() - pusher.last_push) >= pusher.interval:
                     state = model.state_dict()
                     state.pop("head.emb_weight", None)
-                    ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx if not test_mode else 0, "model": state}
+                    ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx if not test_mode else 0,
+                            "tst_tokens": tst_tokens, "dense_tokens": dense_tokens, "model": state}
                     torch.save(ckpt, ckpt_path)
                     pusher.maybe_push(ckpt_path, None, tok_path, step)
                     pm.plot(step)
@@ -264,7 +288,9 @@ def main():
             sd.next_block()
 
     if not test_mode and hf:
-        ckpt = {"step": step, "epoch": epoch, "model": model.state_dict()}
+        ckpt = {"step": step, "epoch": epoch, "block": sd.block_idx,
+                "tst_tokens": tst_tokens, "dense_tokens": dense_tokens,
+                "model": model.state_dict()}
         torch.save(ckpt, ckpt_path)
         hf.upload_checkpoint(ckpt_path, tok_path, step)
 

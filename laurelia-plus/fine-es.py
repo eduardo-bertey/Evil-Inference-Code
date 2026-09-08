@@ -215,7 +215,7 @@ def main():
                 ys.append(y)
             xb = torch.tensor(xs, dtype=torch.long, device=device)
             yb = torch.tensor(ys, dtype=torch.long, device=device)
-            logits, loss = model(xb, labels=yb)
+            logits, loss, aux = model(xb, labels=yb)
             (loss / grad_acc).backward()
             loss_val = loss.item()
             del logits, loss

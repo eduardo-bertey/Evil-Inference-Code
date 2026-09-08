@@ -221,15 +221,15 @@ model.eval()
 
 # Con S=1: forward == forward_with_cache
 ids1 = torch.randint(0, 1000, (B, 1))
-logits_fwd1, _ = model(ids1)
-logits_cache1, caches = model.forward_with_cache(ids1, 0, None)
+logits_fwd1, _, _ = model(ids1, width=1.0)
+logits_cache1, caches = model.forward_with_cache(ids1, 0, None, width=1.0)
 check("LLM single token: forward == forward_with_cache",
       torch.allclose(logits_fwd1, logits_cache1, atol=1e-4))
 
 # Con S>1 y cache=None: forward_with_cache usa is_causal → mismo que forward
 ids4 = torch.randint(0, 1000, (B, S))
-logits_fwd4, _ = model(ids4)
-logits_cache4, _ = model.forward_with_cache(ids4, 0, None)
+logits_fwd4, _, _ = model(ids4, width=1.0)
+logits_cache4, _ = model.forward_with_cache(ids4, 0, None, width=1.0)
 d = maxdiff(logits_fwd4, logits_cache4)
 check("LLM multi token: forward == forward_with_cache",
       torch.allclose(logits_fwd4, logits_cache4, atol=1e-3), f"maxdiff={d:.2e}")
@@ -242,9 +242,9 @@ input_ids = torch.randint(0, 1000, (1, 3))
 caches = None
 # prompt
 for i in range(3):
-    logits_cached, caches = model.forward_with_cache(input_ids[:, i:i+1], i, caches)
+    logits_cached, caches = model.forward_with_cache(input_ids[:, i:i+1], i, caches, width=1.0)
 # full forward para comparar
-logits_full, _ = model(input_ids)
+logits_full, _, _ = model(input_ids, width=1.0)
 # después del prompt loop, el último forward predice la siguiente posición
 # forward_with_cache(offset=2) con tok2 → logits para posición 3 (el "primer token nuevo")
 # forward(input_ids) con seq=3 → logits para posiciones 0,1,2 (predice posiciones 1,2,3)

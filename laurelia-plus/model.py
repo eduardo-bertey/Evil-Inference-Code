@@ -1,38 +1,42 @@
-"""TransformerLM — Dense GQA, basado en LLM_350M_DENSE.
+"""TransformerLM — Denso MLA + MoSE por router, basado en LLM_350M_DENSE.
 
-Init adaptativo por capa, weight tying, KV cache para inferencia.
+- Atención MLA (de moe-plus): latente KV comprimido, RoPE decoupled,
+  caché latente (C_KV, K_rot) en vez de K/V completos.
+- FFN denso slimmable estilo MoSE (sin MoE): 1 router lineal por capa elige
+  entre 4 anchos (full/75/50/25). Train: Gumbel-ST; inferencia: argmax.
+- Loss: CE estándar o TST next-bag (ver tst.py).
+- Init adaptativo por capa, weight tying, KV cache para inferencia.
 """
 
 import math, inspect
-import os as _os
-import sys as _sys
-# Colab/terminal: asegura imports del mismo directorio en cualquier cwd.
-_sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from rope import RoPE
-from moe_lineal import MoELineal
+from tst import multi_token_ce
 
 
 class Config:
     drop = 0.0
-    dim = 512
-    heads = 8
+    dim = 768
+    heads = 12
     kv_groups = 4
     layers = 16
     ffn_dim = 3072
     block_size = 1024
     emb_num = 32000
-    rotary_pct = 0.25
+    rotary_pct = 0.25  # compat (MLA usa RoPE full en d_rotate)
 
-    # MoE en V y O de la atención keyless (Q densa, hallazgo SwitchHead).
-    # 4 expertos top-2 + 1 compartido fijo por MoE. FFN intacto.
-    moe_expertos = 4
-    moe_topk = 2
-    moe_aux_w = 0.03
-    moe_z_w = 0.01
-    moe_ruido = True
+    # MLA
+    mla_d_c = 128
+    mla_d_c1 = 128
+    mla_d_rotate = 64
+    attn_logit_cap = 30.0
+
+    # MoSE (router de ancho por capa, sin MoE)
+    mose_widths = (1.0, 0.75, 0.50, 0.25)
+    mose_cost_w = 1e-3  # penalización costo esperado (prefiere angosto si empata)
+    mose_tau = 1.0      # temperatura Gumbel-ST en train
 
     batch_size: int = 6
     grad_acc: int = 6
@@ -48,122 +52,276 @@ def repeat_kv(x, num_heads, num_kv_groups):
     return x.repeat_interleave(num_heads // num_kv_groups, dim=2)
 
 
-class Attention(nn.Module):
-    """Keyless + MoE en V y O (Q densa, hallazgo SwitchHead). Sin K:
-    Q' = X·WQ·WR, scores contra V, cache solo-V. FFN intacto.
-    Un solo SDPA."""
-    def __init__(self, config):
+# ─── MLA (port de moe-plus/mla_attention.py) ─────────────────────────────
+
+class QKVProjectionMLA(nn.Module):
+    def __init__(self, d_model, num_heads, num_kv_groups, head_dim, d_c, d_c1, d_rotate, bias=False):
         super().__init__()
-        self.num_heads = config.heads
-        self.num_kv_groups = config.kv_groups
-        self.head_dim = config.dim // config.heads
-        self.causal = True
+        self.num_heads = num_heads
+        self.num_kv_groups = num_kv_groups
+        self.head_dim = head_dim
+        self.d_c = d_c
+        self.d_c1 = d_c1
+        self.d_rotate = d_rotate
 
-        self.q_proj = nn.Linear(config.dim, self.num_heads * self.head_dim, bias=False)
-        self.q_proj.is_attention = True
-        self.v_proj = MoELineal(config.dim, self.num_kv_groups * self.head_dim, config)
-        self.o_proj = MoELineal(config.dim, config.dim, config, residual=True)
-        self.wr = nn.Parameter(torch.empty(self.num_heads, self.head_dim, self.head_dim))
-        nn.init.trunc_normal_(self.wr, std=0.02)
-        self.rope = RoPE(self.head_dim, rotary_pct=getattr(config, 'rotary_pct', 0.25))
-        self.attn_dropout = nn.Dropout(config.drop)
+        self.W_down = nn.Linear(d_model, d_c1 + d_c + d_rotate, bias=bias)
+        self.norm_cq = nn.RMSNorm(d_c1, eps=1e-6)
+        self.norm_ckv = nn.RMSNorm(d_c, eps=1e-6)
+        self.W_up_q = nn.Linear(d_c1, num_heads * (head_dim + d_rotate), bias=bias)
+        self.W_up_kv = nn.Linear(d_c, 2 * num_kv_groups * head_dim, bias=bias)
 
-    def _qp(self, x):
-        B, T, _ = x.shape
-        q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim)
-        return torch.einsum("bthd,hde->bthe", q, self.wr)
-
-    @torch.no_grad()
-    def fusionar_wq(self):
-        """WQ_eff = WQ·WR por cabeza (keylees.md §8). WR es la K
-        compactada en el espacio de V: en inferencia Q' = X·WQ_eff
-        en un paso en vez de X→WQ→WR."""
-        wq = self.q_proj.weight.view(self.num_heads, self.head_dim, -1)
-        return torch.einsum("hdo,hde->heo", wq, self.wr)
+        self.W_down.is_attention = True
+        self.W_up_q.is_attention = True
+        self.W_up_kv.is_attention = True
 
     def forward(self, x):
-        B, T, D = x.shape
-        qp = self._qp(x)
-        v = self.v_proj(x).view(B, T, self.num_kv_groups, self.head_dim)
+        B, S, _ = x.shape
+        down = self.W_down(x)
+        C_Q, C_KV, K_rotate = down.split([self.d_c1, self.d_c, self.d_rotate], dim=-1)
 
-        qp, v = self.rope(qp, v, 0)
+        C_Q = self.norm_cq(C_Q)
+        C_KV = self.norm_ckv(C_KV)
 
-        v = repeat_kv(v, self.num_heads, self.num_kv_groups)
+        q_up = self.W_up_q(C_Q)
+        Q_state, Q_rotate = q_up.split([self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
+        Q_state = Q_state.reshape(B, S, self.num_heads, self.head_dim)
+        Q_rotate = Q_rotate.reshape(B, S, self.num_heads, self.d_rotate)
 
-        q = qp.transpose(1, 2)
-        v = v.transpose(1, 2)
+        kv_up = self.W_up_kv(C_KV)
+        K, V = kv_up.chunk(2, dim=-1)
+        K = K.reshape(B, S, self.num_kv_groups, self.head_dim)
+        V = V.reshape(B, S, self.num_kv_groups, self.head_dim)
+        K_rotate = K_rotate.reshape(B, S, 1, self.d_rotate)
 
-        att_output = F.scaled_dot_product_attention(
-            q, v, v,
-            dropout_p=self.attn_dropout.p if self.training else 0.0,
-            is_causal=True,
-        )
+        return Q_state, Q_rotate, K, V, K_rotate
 
-        att_output = att_output.transpose(1, 2).contiguous().view(B, T, D)
-        return self.o_proj(att_output)
+
+class OutputProjectionMLA(nn.Module):
+    def __init__(self, d_model, num_heads, head_dim, bias=False):
+        super().__init__()
+        self.o_proj = nn.Linear(num_heads * head_dim, d_model, bias=bias)
+        self.o_proj.is_residual_proj = True
+
+    def forward(self, x):
+        B, S, NH, QK = x.shape
+        return self.o_proj(x.reshape(B, S, NH * QK))
+
+
+class MLAAttention(nn.Module):
+    """Multi-head Latent Attention con GQA (DeepSeek MLA adaptado)."""
+
+    def __init__(self, config):
+        super().__init__()
+        d_model = config.dim
+        num_heads = config.heads
+        num_kv_groups = config.kv_groups
+        head_dim = d_model // num_heads
+        self.num_heads = num_heads
+        self.num_kv_groups = num_kv_groups
+        self.head_dim = head_dim
+        self.d_rotate = config.mla_d_rotate
+        self.causal = True
+        self.attn_logit_cap = getattr(config, "attn_logit_cap", 30.0)
+        max_seq_len = config.block_size
+
+        self.qkv = QKVProjectionMLA(
+            d_model, num_heads, num_kv_groups, head_dim,
+            config.mla_d_c, config.mla_d_c1, config.mla_d_rotate, bias=False)
+        self.o_proj = OutputProjectionMLA(d_model, num_heads, head_dim, bias=False)
+        self.q_norm = nn.RMSNorm(head_dim, eps=1e-6)
+        self.k_norm = nn.RMSNorm(head_dim, eps=1e-6)
+        self.rope = RoPE(head_dim=self.d_rotate, max_seq_len=max_seq_len,
+                         base=10000.0, rotary_pct=1.0)
+        self.attn_dropout = nn.Dropout(config.drop)
+
+        mask = torch.triu(torch.full((max_seq_len, max_seq_len), float("-inf")), diagonal=1)
+        self.register_buffer("causal_mask", mask, persistent=False)
+
+    def _scores(self, Q_state, Q_rot, K_state, K_rot, seq_len, kv_len=None, causal=True):
+        """Decoupled content/sqrt(d_c) + rope (QK-norm: rope sin escala extra)."""
+        scale_c = 1.0 / math.sqrt(self.qkv.d_c)
+        k_c = repeat_kv(K_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
+        q_c = Q_state.transpose(1, 2)
+        s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) * scale_c
+
+        q_r = Q_rot.transpose(1, 2)
+        k_r = K_rot.transpose(1, 2).expand(-1, self.num_heads, -1, -1)
+        s_r = torch.matmul(q_r, k_r.transpose(-2, -1))
+
+        scores = s_c + s_r
+        if self.attn_logit_cap is not None:
+            scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
+
+        if causal:
+            if kv_len is None:
+                kv_len = K_state.shape[1]
+            if seq_len > 1:
+                if seq_len == kv_len and seq_len <= self.causal_mask.shape[0]:
+                    scores = scores + self.causal_mask[:seq_len, :seq_len]
+                else:
+                    mask = torch.triu(
+                        torch.full((seq_len, kv_len), float("-inf"), device=scores.device),
+                        diagonal=kv_len - seq_len + 1)
+                    scores = scores + mask
+        return scores
+
+    def _attend(self, Q_state, Q_rot, K_state, V_state, K_rot, q_len, kv_len, causal):
+        Q_state = self.q_norm(Q_state)
+        K_state = self.k_norm(K_state)
+        scores = self._scores(Q_state, Q_rot, K_state, K_rot, q_len, kv_len, causal)
+        attn_w = F.softmax(scores, dim=-1)
+        attn_w = self.attn_dropout(attn_w)
+        v = repeat_kv(V_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
+        return torch.matmul(attn_w, v).transpose(1, 2)  # (B, T, nh, hd)
+
+    def forward(self, x):
+        Q_state, Q_rotate, K, V, K_rotate = self.qkv(x)
+        Q_rotate, K_rotate = self.rope(Q_rotate, K_rotate, 0)
+        T = x.shape[1]
+        out = self._attend(Q_state, Q_rotate, K, V, K_rotate, T, T, True)
+        return self.o_proj(out)
 
     def forward_with_cache(self, x, offset, cache):
+        """Caché latente (C_KV, K_rot_raw)."""
         B, S_new, _ = x.shape
+        down = self.qkv.W_down(x)
+        C_Q_new, C_KV_new, K_rot_raw = down.split(
+            [self.qkv.d_c1, self.qkv.d_c, self.qkv.d_rotate], dim=-1)
+        C_Q_new = self.qkv.norm_cq(C_Q_new)
+        C_KV_new = self.qkv.norm_ckv(C_KV_new)
 
-        qp_new = self._qp(x)
-        v_new = self.v_proj(x).view(B, S_new, self.num_kv_groups, self.head_dim)
-
-        qp_new, v_new = self.rope(qp_new, v_new, offset)
+        q_up = self.qkv.W_up_q(C_Q_new)
+        Q_state, Q_rot_raw = q_up.split(
+            [self.num_heads * self.head_dim, self.num_heads * self.d_rotate], dim=-1)
+        Q_state = Q_state.reshape(B, S_new, self.num_heads, self.head_dim)
+        Q_rot_raw = Q_rot_raw.reshape(B, S_new, self.num_heads, self.d_rotate)
+        Q_rot = self.rope.apply_single(Q_rot_raw, offset=offset)
 
         if cache is not None:
-            v_full = torch.cat([cache, v_new], dim=1)
+            C_KV_full = torch.cat([cache[0], C_KV_new], dim=1)
+            K_rot_full = torch.cat([cache[1], K_rot_raw], dim=1)
         else:
-            v_full = v_new
+            C_KV_full = C_KV_new
+            K_rot_full = K_rot_raw
+        S_full = C_KV_full.shape[1]
 
-        new_cache = v_full.clone()
+        kv_up = self.qkv.W_up_kv(C_KV_full)
+        K_state, V_state = kv_up.chunk(2, dim=-1)
+        K_state = K_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
+        V_state = V_state.reshape(B, S_full, self.num_kv_groups, self.head_dim)
 
-        v_exp = repeat_kv(v_full, self.num_heads, self.num_kv_groups)
+        K_rot = self.rope.apply_single(K_rot_full.unsqueeze(2), offset=0)
 
-        q = qp_new.transpose(1, 2)
-        v = v_exp.transpose(1, 2)
-
-        att_output = F.scaled_dot_product_attention(
-            q, v, v,
-            is_causal=(cache is None),
-        )
-
-        att_output = att_output.transpose(1, 2).contiguous().view(B, S_new, -1)
-        return self.o_proj(att_output), new_cache
+        out = self._attend(Q_state, Q_rot, K_state, V_state, K_rot,
+                           S_new, S_full, S_new > 1)
+        return self.o_proj(out), (C_KV_full, K_rot_full)
 
 
-class MLP(nn.Module):
+# ─── MoSE denso: MLP slimmable + router de ancho por capa ─────────────────
+
+class SlimMLP(nn.Module):
+    """FFN SwiGLU denso con ancho slimmable (prefijo, estilo MoSE, sin MoE)."""
+
     def __init__(self, config):
         super().__init__()
         self.fc1 = nn.Linear(config.dim, 2 * config.ffn_dim, bias=False)
         self.fc2 = nn.Linear(config.ffn_dim, config.dim, bias=False)
         self.dropout = nn.Dropout(config.drop)
+        self.full_dim = config.ffn_dim
         self.fc2.is_residual_proj = True
 
-    def forward(self, x):
-        x = self.fc1(x)
-        x, gate = x.chunk(2, dim=-1)
-        x = x * F.silu(gate)
-        return self.dropout(self.fc2(x))
+    def width_dim(self, width):
+        if width is None:
+            return self.full_dim
+        return max(8, int(self.full_dim * width))
+
+    def forward(self, x, width=None):
+        d = self.width_dim(width)
+        I = self.full_dim
+        if d >= I:
+            h = self.fc1(x)
+            a, gate = h.chunk(2, dim=-1)
+        else:
+            w1 = self.fc1.weight
+            a = F.linear(x, w1[:d])
+            gate = F.linear(x, w1[I:I + d])
+        h = a * F.silu(gate)
+        if d >= I:
+            return self.dropout(self.fc2(h))
+        return self.dropout(F.linear(h, self.fc2.weight[:, :d]))
+
+
+class WidthRouter(nn.Module):
+    """Router mínimo por capa: 1 lineal dim→4 anchos (full/75/50/25).
+
+    Train: Gumbel-ST (pasa hard, gradiente soft) + penalización de costo.
+    Eval: argmax.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.widths = tuple(getattr(config, "mose_widths", (1.0, 0.75, 0.50, 0.25)))
+        self.cost_w = getattr(config, "mose_cost_w", 1e-3)
+        self.tau = getattr(config, "mose_tau", 1.0)
+        self.proj = nn.Linear(config.dim, len(self.widths), bias=True)
+        self.last_idx = 0  # último ancho elegido (para log)
+
+    def forward(self, h):
+        pooled = h.float().mean(dim=(0, 1))  # una decisión por capa y forward
+        logits = self.proj(pooled) / self.tau
+        probs = F.softmax(logits, dim=-1)
+        wvec = torch.tensor(self.widths, device=h.device, dtype=probs.dtype)
+        if self.training:
+            u = torch.rand_like(probs).clamp_min(1e-9)
+            g = -torch.log(-torch.log(u))
+            y_hard = torch.zeros_like(probs).scatter_(
+                0, (logits + g).argmax(-1, keepdim=True), 1.0)
+            y = (y_hard - probs).detach() + probs  # ST: hard pasa, soft gradientea
+        else:
+            y = torch.zeros_like(probs).scatter_(
+                0, probs.argmax(-1, keepdim=True), 1.0)
+        idx = int(y.argmax(-1).item()) if not self.training else int(
+            (logits + g).argmax(-1).item())
+        self.last_idx = idx
+        width = self.widths[idx]
+        # Escala ST: vale 1.0 en forward, lleva gradiente del task-loss al router.
+        scale = (y @ wvec) / width if self.training else None
+        aux = self.cost_w * (probs @ wvec)  # prefiere angosto si empata calidad
+        return width, scale, aux
 
 
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.ln_1 = nn.RMSNorm(config.dim)
-        self.attn = Attention(config)
+        self.attn = MLAAttention(config)
         self.ln_2 = nn.RMSNorm(config.dim)
-        self.mlp = MLP(config)
+        self.mlp = SlimMLP(config)
+        self.router = WidthRouter(config)
 
-    def forward(self, x):
+    def forward(self, x, width=None):
         x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
-        return x
+        h = self.ln_2(x)
+        if width is None:
+            w, scale, aux = self.router(h)
+        else:
+            w, scale, aux = width, None, torch.zeros((), device=x.device)
+        out = self.mlp(h, w)
+        if scale is not None:
+            out = out * scale
+        x = x + out
+        return x, aux
 
-    def forward_with_cache(self, x, offset, cache):
+    def forward_with_cache(self, x, offset, cache, width=None):
         h = self.ln_1(x)
         h, new_cache = self.attn.forward_with_cache(h, offset, cache)
         x = x + h
-        x = x + self.mlp(self.ln_2(x))
+        h2 = self.ln_2(x)
+        if width is None:
+            w, _, _ = self.router(h2)
+        else:
+            w = width
+        x = x + self.mlp(h2, w)
         return x, new_cache
 
 
@@ -227,44 +385,48 @@ class LLM(nn.Module):
         print(f"using fused AdamW: {use_fused}")
         return optimizer
 
-    def forward(self, input_ids, labels=None):
+    def forward(self, input_ids, labels=None, mtp_weights=None, width=None):
+        """width: ancho global forzado (None = router por capa)."""
         x = self.embeddings(input_ids)
 
+        aux_total = 0.0
         for block in self.blocks:
-            x = block(x)
+            x, aux = block(x, width)
+            aux_total = aux_total + aux
 
         x = self.norm_f(x)
         logits = self.lm_head(x)
 
-        aux = self.aux_total()
-        self.ultimo_aux = aux.detach() if torch.is_tensor(aux) else torch.tensor(0.0)
         loss = None
         if labels is not None:
-            loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.0, reduction="mean")
-            loss = loss_fct(
-                logits.view(-1, logits.size(-1)),
-                labels.view(-1),
-            )
-            if torch.is_tensor(aux) and aux.numel() == 1 and aux.item() != 0.0:
-                loss = loss + aux
+            if mtp_weights is not None:
+                N = logits.size(0) * logits.size(1)
+                tot = multi_token_ce(logits.float().reshape(N, -1),
+                                     labels.reshape(-1), mtp_weights)
+                loss = tot / max(N, 1)  # por token (igual escala que CE mean)
+            else:
+                loss_fct = nn.CrossEntropyLoss(ignore_index=-100, label_smoothing=0.0, reduction="mean")
+                loss = loss_fct(
+                    logits.view(-1, logits.size(-1)),
+                    labels.view(-1),
+                )
 
-        return logits, loss
+        return logits, loss, aux_total
 
-    def aux_total(self):
-        """Suma last_aux de todos los MoE (0.0 si no hay)."""
-        total = torch.tensor(0.0)
-        for m in self.modules():
-            a = getattr(m, "last_aux", None)
-            if torch.is_tensor(a) and a.numel() == 1:
-                total = total.to(a.device) + a
-        return total
+    def width_report(self):
+        """Conteo de capas por ancho elegido (full/75/50/25)."""
+        n = len(self.config.mose_widths)
+        counts = [0] * n
+        for b in self.blocks:
+            counts[b.router.last_idx] += 1
+        return counts
 
-    def forward_with_cache(self, input_ids, offset, caches):
+    def forward_with_cache(self, input_ids, offset, caches, width=None):
         x = self.embeddings(input_ids)
         new_caches = []
         for i, block in enumerate(self.blocks):
             cache = caches[i] if caches is not None and i < len(caches) else None
-            x, new_cache = block.forward_with_cache(x, offset, cache)
+            x, new_cache = block.forward_with_cache(x, offset, cache, width)
             new_caches.append(new_cache)
         x = self.norm_f(x)
         logits = self.lm_head(x)
@@ -272,12 +434,12 @@ class LLM(nn.Module):
 
     @torch.no_grad()
     def generate(self, input_ids, max_new_tokens=100, temperature=0.8, top_k=50,
-                 top_p=0.9, repetition_penalty=1.1, eos_token_id=None):
+                 top_p=0.9, repetition_penalty=1.1, eos_token_id=None, width=None):
         caches = None
         prompt_len = input_ids.shape[1]
 
         for i in range(prompt_len):
-            logits, caches = self.forward_with_cache(input_ids[:, i:i+1], i, caches)
+            logits, caches = self.forward_with_cache(input_ids[:, i:i+1], i, caches, width)
 
         for gen_i in range(max_new_tokens):
             logits_last = logits[:, -1, :] / temperature
@@ -307,6 +469,6 @@ class LLM(nn.Module):
                 break
 
             input_ids = torch.cat([input_ids, next_tok], dim=1)
-            logits, caches = self.forward_with_cache(next_tok, prompt_len + gen_i, caches)
+            logits, caches = self.forward_with_cache(next_tok, prompt_len + gen_i, caches, width)
 
         return input_ids

@@ -72,6 +72,17 @@ class RoPE(nn.Module):
         k_out = self._rotate_partial(k, cos, sin)
         return q_out, k_out
 
+    def apply_single(self, x, offset=0):
+        """Rota un solo tensor (para MLA: Q_rot o K_rot decoupled)."""
+        seq_len = x.shape[1]
+        end = offset + seq_len
+        if end > self.max_seq_len:
+            self._build_cache(end)
+            self.max_seq_len = end
+        cos = self.cos_cached[offset:end].unsqueeze(0).unsqueeze(2)
+        sin = self.sin_cached[offset:end].unsqueeze(0).unsqueeze(2)
+        return self._rotate_partial(x, cos, sin)
+
     def _rotate_partial(self, x, cos, sin):
         """Rotea solo las primeras rotary_dim dimensiones, el resto pasa sin cambio."""
         rd = self.rotary_dim
