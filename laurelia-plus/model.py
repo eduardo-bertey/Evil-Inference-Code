@@ -137,18 +137,24 @@ class MLAAttention(nn.Module):
         mask = torch.triu(torch.full((max_seq_len, max_seq_len), float("-inf")), diagonal=1)
         self.register_buffer("causal_mask", mask, persistent=False)
 
-    def _scores(self, Q_state, Q_rot, K_state, K_rot, seq_len, kv_len=None, causal=True):
-        """Decoupled content/sqrt(d_c) + rope (QK-norm: rope sin escala extra)."""
+    def _scores(self, Q_state, Q_rot, K_state, K_rot, seq_len, kv_len=None, causal=True, q_off=0):
+        """Decoupled content/sqrt(d_c) + rope (QK-norm: rope sin escala extra).
+
+        q_off: posición global de la primera query (para chunks: máscara j<=q_off+r).
+        """
         scale_c = 1.0 / math.sqrt(self.qkv.d_c)
         k_c = repeat_kv(K_state, self.num_heads, self.num_kv_groups).transpose(1, 2)
         q_c = Q_state.transpose(1, 2)
-        s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) * scale_c
+        # Scores en bf16 (mitad de memoria que f32), softmax en f32.
+        use_amp = torch.cuda.is_available()
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_amp):
+            s_c = torch.matmul(q_c, k_c.transpose(-2, -1)) * scale_c
 
-        q_r = Q_rot.transpose(1, 2)
-        k_r = K_rot.transpose(1, 2).expand(-1, self.num_heads, -1, -1)
-        s_r = torch.matmul(q_r, k_r.transpose(-2, -1))
+            q_r = Q_rot.transpose(1, 2)
+            k_r = K_rot.transpose(1, 2).expand(-1, self.num_heads, -1, -1)
+            s_r = torch.matmul(q_r, k_r.transpose(-2, -1))
 
-        scores = s_c + s_r
+            scores = (s_c + s_r).float()
         if self.attn_logit_cap is not None:
             scores = torch.tanh(scores / self.attn_logit_cap) * self.attn_logit_cap
 
@@ -161,7 +167,7 @@ class MLAAttention(nn.Module):
                 else:
                     mask = torch.triu(
                         torch.full((seq_len, kv_len), float("-inf"), device=scores.device),
-                        diagonal=kv_len - seq_len + 1)
+                        diagonal=q_off + 1)
                     scores = scores + mask
         return scores
 
@@ -178,20 +184,8 @@ class MLAAttention(nn.Module):
         Q_state, Q_rotate, K, V, K_rotate = self.qkv(x)
         Q_rotate, K_rotate = self.rope(Q_rotate, K_rotate, 0)
         T = x.shape[1]
-        Q_state = self.q_norm(Q_state)
-        K = self.k_norm(K)
-        v = repeat_kv(V, self.num_heads, self.num_kv_groups).transpose(1, 2)
-        # Chunk de queries (exacto: cada fila es independiente dado KV completo).
-        outs = []
-        CQ = 256
-        for s in range(0, T, CQ):
-            e = min(s + CQ, T)
-            sc = self._scores(Q_state[:, s:e], Q_rotate[:, s:e], K, K_rotate,
-                              e - s, T, True)
-            w = F.softmax(sc, dim=-1)
-            w = self.attn_dropout(w)
-            outs.append(torch.matmul(w, v).transpose(1, 2))
-        return self.o_proj(torch.cat(outs, dim=1))
+        out = self._attend(Q_state, Q_rotate, K, V, K_rotate, T, T, True)
+        return self.o_proj(out)
 
     def forward_with_cache(self, x, offset, cache):
         """Caché latente (C_KV, K_rot_raw)."""
