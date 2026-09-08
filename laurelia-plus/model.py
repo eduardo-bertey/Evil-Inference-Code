@@ -36,6 +36,8 @@ class Config:
     mose_widths = (1.0, 0.75, 0.50, 0.25)
     mose_cost_w = 1e-3  # penalización costo esperado (prefiere angosto si empata)
     mose_tau = 1.0      # temperatura Gumbel-ST en train
+    mose_noise_std = 0.01  # ruido gaussiano en logits (como moe-plus)
+    mose_z_gamma = 0.001   # z-loss en logits (como moe-plus)
 
     batch_size: int = 6
     grad_acc: int = 6
@@ -250,12 +252,16 @@ class WidthRouter(nn.Module):
         self.widths = tuple(getattr(config, "mose_widths", (1.0, 0.75, 0.50, 0.25)))
         self.cost_w = getattr(config, "mose_cost_w", 1e-3)
         self.tau = getattr(config, "mose_tau", 1.0)
+        self.noise_std = getattr(config, "mose_noise_std", 0.01)
+        self.z_gamma = getattr(config, "mose_z_gamma", 0.001)
         self.proj = nn.Linear(config.dim, len(self.widths), bias=True)
         self.last_idx = 0  # último ancho elegido (para log)
 
     def forward(self, h):
         pooled = h.float().mean(dim=(0, 1))  # una decisión por capa y forward
         logits = self.proj(pooled) / self.tau
+        if self.training and self.noise_std > 0:
+            logits = logits + torch.randn_like(logits) * self.noise_std
         probs = F.softmax(logits, dim=-1)
         wvec = torch.tensor(self.widths, device=h.device, dtype=probs.dtype)
         if self.training:
@@ -273,7 +279,8 @@ class WidthRouter(nn.Module):
         width = self.widths[idx]
         # Escala ST: vale 1.0 en forward, lleva gradiente del task-loss al router.
         scale = (y @ wvec) / width if self.training else None
-        aux = self.cost_w * (probs @ wvec)  # prefiere angosto si empata calidad
+        z = torch.logsumexp(logits, dim=-1).pow(2).mean()  # z-loss (moe-plus)
+        aux = self.cost_w * (probs @ wvec) + self.z_gamma * z
         return width, scale, aux
 
 
@@ -299,16 +306,33 @@ class Block(nn.Module):
         x = x + out
         return x, aux
 
+    def _mose_mlp_tokens(self, h, idx):
+        """MLP por token agrupado por ancho (solo generate, train intacto)."""
+        out = torch.empty_like(h)
+        for k, w in enumerate(self.router.widths):
+            m = (idx == k)
+            if m.any():
+                out[m] = self.mlp(h[m], w)
+        return out
+
+    def _bucket(self, width):
+        widths = self.router.widths
+        return min(range(len(widths)), key=lambda i: abs(widths[i] - width))
+
     def forward_with_cache(self, x, offset, cache, width=None):
         h = self.ln_1(x)
         h, new_cache = self.attn.forward_with_cache(h, offset, cache)
         x = x + h
         h2 = self.ln_2(x)
         if width is None:
-            w, _, _ = self.router(h2)
+            # Router por token en generate: sin promedio, argmax por posición.
+            logits = self.router.proj(h2.float()) / self.router.tau
+            idx = logits.argmax(-1)
+            self.router.last_idx = int(torch.mode(idx.view(-1)).values.item())
         else:
-            w = width
-        x = x + self.mlp(h2, w)
+            idx = torch.full(h2.shape[:2], self._bucket(width),
+                             dtype=torch.long, device=x.device)
+        x = x + self._mose_mlp_tokens(h2, idx)
         return x, new_cache
 
 
