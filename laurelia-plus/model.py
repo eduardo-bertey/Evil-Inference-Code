@@ -178,8 +178,20 @@ class MLAAttention(nn.Module):
         Q_state, Q_rotate, K, V, K_rotate = self.qkv(x)
         Q_rotate, K_rotate = self.rope(Q_rotate, K_rotate, 0)
         T = x.shape[1]
-        out = self._attend(Q_state, Q_rotate, K, V, K_rotate, T, T, True)
-        return self.o_proj(out)
+        Q_state = self.q_norm(Q_state)
+        K = self.k_norm(K)
+        v = repeat_kv(V, self.num_heads, self.num_kv_groups).transpose(1, 2)
+        # Chunk de queries (exacto: cada fila es independiente dado KV completo).
+        outs = []
+        CQ = 256
+        for s in range(0, T, CQ):
+            e = min(s + CQ, T)
+            sc = self._scores(Q_state[:, s:e], Q_rotate[:, s:e], K, K_rotate,
+                              e - s, T, True)
+            w = F.softmax(sc, dim=-1)
+            w = self.attn_dropout(w)
+            outs.append(torch.matmul(w, v).transpose(1, 2))
+        return self.o_proj(torch.cat(outs, dim=1))
 
     def forward_with_cache(self, x, offset, cache):
         """Caché latente (C_KV, K_rot_raw)."""
