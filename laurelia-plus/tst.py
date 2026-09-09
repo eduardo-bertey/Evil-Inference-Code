@@ -151,7 +151,6 @@ def folded_bag_ce(logits_fold: Tensor, labels: Tensor, s: int) -> Tensor:
     ok1 = pos < T                                                   # [L,s]
     idx = (row + pos.clamp_max(T - 1)).reshape(B * L, s)
     okf = ok1.unsqueeze(0).expand(B, L, s).reshape(B * L, s)
-    idx = (row + pos.clamp_max(T - 1)).reshape(B * L, s)
     lse = torch.logsumexp(logits_fold.reshape(B * L, V), dim=-1, keepdim=True)
     ce = lse - logits_fold.reshape(B * L, V).gather(1, idx)          # [B*L, s]
     okf = okf.to(ce.dtype)
