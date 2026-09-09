@@ -141,8 +141,8 @@ def folded_bag_ce(logits_fold: Tensor, labels: Tensor, s: int, weights: Tensor) 
     dev = logits_fold.device
     row = torch.arange(B, device=dev)[:, None, None] * T            # [B,1,1]
     pos = (torch.arange(L, device=dev)[None, :, None] * s + (s - 1)
-           + torch.arange(s, device=dev)[None, None, :])              # [B,L,s]
-    ok = pos < T
+           + torch.arange(s, device=dev)[None, None, :])              # [1,L,s]
+    ok = (row + pos) < T                                             # [B,L,s]
     idx = (row + pos.clamp_max(T - 1)).reshape(B * L, s)
     lse = torch.logsumexp(logits_fold.reshape(B * L, V), dim=-1, keepdim=True)
     ce = lse - logits_fold.reshape(B * L, V).gather(1, idx)          # [B*L, s]
