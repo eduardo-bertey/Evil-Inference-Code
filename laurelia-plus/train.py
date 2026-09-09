@@ -93,7 +93,7 @@ def main():
         tst_on = input("Habilitar TST? (s/n): ").strip().lower()
         tst_cfg = TSTConfig(enabled=(tst_on == "s"), n_predict=4, mode="fijo")
     print(f"  Compute: {dtype}")
-    print(f"  TST: {'ON' if tst_cfg.enabled else 'OFF'} (n={tst_cfg.n_predict} base={tst_cfg.base} {tst_cfg.mode})")
+    print(f"  TST: {'ON' if tst_cfg.enabled else 'OFF'} (n={tst_cfg.n_predict} base={tst_cfg.base} {tst_cfg.mode} fold={4 if tst_cfg.enabled else 1})")
 
     tokenizer = None
     if os.path.exists(tok_path):
@@ -233,19 +233,19 @@ def main():
 
             tok_n = x.numel()
             mtp_w = None
+            fold = 1
             if tst_cfg.enabled:
-                w = mtp_weights_for_step(tst_cfg, step, total_steps, x.device)
-                if w.numel() > 1 and float(w[1]) > 0.0:
-                    mtp_w = w
-                    tst_tokens += tok_n
-                    mtp_tag = f"mtp {[round(float(v), 3) for v in w.tolist()]}"
-                else:
-                    dense_tokens += tok_n
-                    mtp_tag = "CE"
+                FOLD = 4
+                w = torch.tensor([1.0, 0.5, 0.25, 0.125], device=x.device)
+                w = w / w.sum()  # media: paridad de escala con CE (estilo paper)
+                mtp_w = w
+                fold = FOLD
+                tst_tokens += tok_n
+                mtp_tag = f"fold{FOLD} {[round(float(v), 3) for v in w.tolist()]}"
             else:
                 dense_tokens += tok_n
                 mtp_tag = ""
-            logits, loss, aux = model(x, labels=y, mtp_weights=mtp_w)
+            logits, loss, aux = model(x, labels=y, mtp_weights=mtp_w, fold=fold)
             ((loss + aux) / config.grad_acc).backward()
             loss_val = loss.item()
             del logits, loss

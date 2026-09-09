@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from rope import RoPE
-from tst import multi_token_ce
+from tst import multi_token_ce, folded_bag_ce
 
 
 class Config:
@@ -403,9 +403,23 @@ class LLM(nn.Module):
         print(f"using fused AdamW: {use_fused}")
         return optimizer
 
-    def forward(self, input_ids, labels=None, mtp_weights=None, width=None):
-        """width: ancho global forzado (None = router por capa)."""
-        x = self.embeddings(input_ids)
+    def forward(self, input_ids, labels=None, mtp_weights=None, width=None, fold=1):
+        """width: ancho global forzado (None = router por capa).
+        fold: plegado de inputs TST (1 = sin plegar)."""
+        if fold is None or fold < 1:
+            fold = 1
+        if fold > 1:
+            B, T = input_ids.shape
+            L = T // fold
+            Tc = L * fold
+            input_ids = input_ids[:, :Tc]
+            if labels is not None:
+                labels = labels[:, :Tc]
+            e = self.embeddings(input_ids)  # (B, Tc, D)
+            # Superposición: promedio de cada grupo de `fold` embeddings (f32).
+            x = e.float().view(B, L, fold, -1).mean(dim=2).to(e.dtype)
+        else:
+            x = self.embeddings(input_ids)
 
         aux_total = 0.0
         for block in self.blocks:
@@ -417,7 +431,10 @@ class LLM(nn.Module):
 
         loss = None
         if labels is not None:
-            if mtp_weights is not None:
+            if fold > 1:
+                tot = folded_bag_ce(logits.float(), labels, fold, mtp_weights)
+                loss = tot / max(logits.shape[0] * logits.shape[1], 1)
+            elif mtp_weights is not None:
                 N = logits.size(0) * logits.size(1)
                 tot = multi_token_ce(logits.float().reshape(N, -1),
                                      labels.reshape(-1), mtp_weights)

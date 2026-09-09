@@ -94,6 +94,9 @@ def multi_token_ce(logits_flat: Tensor, targets_flat: Tensor, mtp_weights: Tenso
     targets_flat: [N] int64, targets next-token en orden de stream.
     mtp_weights:  [P] float; peso de predecir el (k+1)-ésimo token futuro.
 
+    Ventana de targets futuros: t -> [target[t], ..., target[t+P-1]].
+    CE = logsumexp(logits) - logit(target) por futuro, pesado y sumado.
+
     Con mtp_weights = [1, 0, ..., 0] equivale a
     F.cross_entropy(logits_flat, targets_flat, reduction="sum").
     """
@@ -101,13 +104,47 @@ def multi_token_ce(logits_flat: Tensor, targets_flat: Tensor, mtp_weights: Tenso
     if P == 1:
         return F.cross_entropy(logits_flat, targets_flat, reduction="sum")
 
-    N = targets_flat.size(0)
-    padded = F.pad(targets_flat, (0, P - 1))          # [N + P - 1]
-    idx = padded.unfold(0, P, 1)                        # [N, P]: ventana de P targets
-    target_logits = logits_flat.gather(1, idx)         # [N, P]
-    lse = torch.logsumexp(logits_flat, dim=-1, keepdim=True)  # [N, 1]
-    ce = lse - target_logits                            # [N, P]
-    # Las últimas k posiciones no tienen (k+1)-ésimo futuro válido: se enmascaran.
+    N = targets_flat.numel()
+
+    # [N + P - 1] -> [N, P]: ventana de P targets por posición
+    padded = F.pad(targets_flat, (0, P - 1))
+    windows = padded.unfold(0, P, 1)
+
+    # [N, P]
+    target_logits = logits_flat.gather(1, windows)
+
+    # log softmax implícito: CE = logsumexp(logits) - logit(target)
+    lse = torch.logsumexp(logits_flat, dim=-1, keepdim=True)
+    ce = lse - target_logits
+
+    # Las últimas k posiciones no tienen (k+1)-ésimo futuro válido.
     for k in range(1, P):
         ce[max(N - k, 0):, k] = 0.0
+
     return (ce * mtp_weights).sum()
+
+
+def folded_bag_ce(logits_fold: Tensor, labels: Tensor, s: int, weights: Tensor) -> Tensor:
+    """MCE sobre bags no-overlapping desde secuencia plegada (paper).
+
+    logits_fold: [B, L, V] float (L = T // s, ya plegada).
+    labels:      [B, T] ids originales.
+    weights:     [s] float (sumar ~1 para paridad de escala con CE).
+
+    La posición plegada k (texto [ks, ks+s-1]) predice el bag
+    siguiente [ks+s, ks+2s-1] = labels[ks+s-1 : ks+2s-1].
+    """
+    B, L, V = logits_fold.shape
+    T = labels.shape[1]
+    assert weights.numel() == s
+    flat = labels.reshape(-1)  # [B*T]
+    dev = logits_fold.device
+    row = torch.arange(B, device=dev)[:, None, None] * T            # [B,1,1]
+    pos = (torch.arange(L, device=dev)[None, :, None] * s + (s - 1)
+           + torch.arange(s, device=dev)[None, None, :])              # [B,L,s]
+    ok = pos < T
+    idx = (row + pos.clamp_max(T - 1)).reshape(B * L, s)
+    lse = torch.logsumexp(logits_fold.reshape(B * L, V), dim=-1, keepdim=True)
+    ce = lse - logits_fold.reshape(B * L, V).gather(1, idx)          # [B*L, s]
+    ce = ce * ok.reshape(B * L, s).to(ce.dtype)
+    return (ce * weights).sum()
