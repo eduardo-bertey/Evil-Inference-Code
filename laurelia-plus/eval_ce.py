@@ -14,7 +14,8 @@ sys.path.insert(0, _DIR)
 from tokenizers import Tokenizer
 from model import LLM, Config
 from huggingface import HFManager
-import train_data
+import importlib
+train_data = importlib.import_module("train-data")
 from train import BPEWrapper
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
