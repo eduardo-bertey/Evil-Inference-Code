@@ -432,7 +432,7 @@ class LLM(nn.Module):
         loss = None
         if labels is not None:
             if fold > 1:
-                tot = folded_bag_ce(logits.float(), labels, fold, mtp_weights)
+                tot = folded_bag_ce(logits.float(), labels, fold)
                 loss = tot / max(logits.shape[0] * logits.shape[1], 1)
             elif mtp_weights is not None:
                 N = logits.size(0) * logits.size(1)

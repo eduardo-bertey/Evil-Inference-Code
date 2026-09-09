@@ -124,19 +124,21 @@ def multi_token_ce(logits_flat: Tensor, targets_flat: Tensor, mtp_weights: Tenso
     return (ce * mtp_weights).sum()
 
 
-def folded_bag_ce(logits_fold: Tensor, labels: Tensor, s: int, weights: Tensor) -> Tensor:
-    """MCE sobre bags no-overlapping desde secuencia plegada (paper).
+def folded_bag_ce(logits_fold: Tensor, labels: Tensor, s: int) -> Tensor:
+    """MCE del paper sobre bags no-overlapping desde secuencia plegada.
 
     logits_fold: [B, L, V] float (L = T // s, ya plegada).
     labels:      [B, T] ids originales.
-    weights:     [s] float (sumar ~1 para paridad de escala con CE).
 
     La posición plegada k (texto [ks, ks+s-1]) predice el bag
     siguiente [ks+s, ks+2s-1] = labels[ks+s-1 : ks+2s-1].
+
+    MCE = media de los CE del bag (siempre >= 0, comparable con CE).
+    Sin el -log(N): ese término solo corre la escala (puede dar
+    negativo) sin cambiar el gradiente.
     """
     B, L, V = logits_fold.shape
     T = labels.shape[1]
-    assert weights.numel() == s
     flat = labels.reshape(-1)  # [B*T]
     dev = logits_fold.device
     row = torch.arange(B, device=dev)[:, None, None] * T            # [B,1,1]
@@ -146,5 +148,7 @@ def folded_bag_ce(logits_fold: Tensor, labels: Tensor, s: int, weights: Tensor) 
     idx = (row + pos.clamp_max(T - 1)).reshape(B * L, s)
     lse = torch.logsumexp(logits_fold.reshape(B * L, V), dim=-1, keepdim=True)
     ce = lse - logits_fold.reshape(B * L, V).gather(1, idx)          # [B*L, s]
-    ce = ce * ok.reshape(B * L, s).to(ce.dtype)
-    return (ce * weights).sum()
+    okf = ok.reshape(B * L, s).to(ce.dtype)
+    ce = ce * okf
+    valid = okf.sum(dim=-1, keepdim=True).clamp_min(1)
+    return (ce.sum(dim=-1, keepdim=True) / valid).sum()
