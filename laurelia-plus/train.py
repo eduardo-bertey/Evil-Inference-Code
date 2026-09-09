@@ -92,6 +92,7 @@ def main():
         dtype = torch.bfloat16 if prec == "b" else torch.float32
         tst_on = input("Habilitar TST? (s/n): ").strip().lower()
         tst_cfg = TSTConfig(enabled=(tst_on == "s"), n_predict=4, mode="fijo")
+        config.batch_size = 8 if tst_cfg.enabled else 6
     print(f"  Compute: {dtype}")
     print(f"  TST: {'ON' if tst_cfg.enabled else 'OFF'} (n={tst_cfg.n_predict} base={tst_cfg.base} {tst_cfg.mode} fold={4 if tst_cfg.enabled else 1})")
 
@@ -175,7 +176,7 @@ def main():
         sd.load_tokens(tokenizer)
         tokens = sd.get_tokens()
         n = len(tokens)
-        seq_len = config.block_size
+        seq_len = config.block_size * (2 if tst_cfg.enabled else 1)
         n_seq = (n - seq_len - 1) // seq_len
         steps_per_epoch = n_seq // config.batch_size
         total_steps = steps_per_epoch * 200000
