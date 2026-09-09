@@ -143,6 +143,8 @@ class TrainData:
         max_bytes = int(self._mb_for(label) * 1024 * 1024)
         print(f"  Descargando {label} (bloque {self.block_idx}, {self._mb_for(label)}MB)...")
         buf = bytearray()
+        seen_items = set()
+        n_items = 0
         for item in it:
             text = self._text_for(label, item)
             tam = len(text.encode("utf-8"))
@@ -152,6 +154,12 @@ class TrainData:
             if len(buf) + tam > max_bytes:
                 break
             buf += text.encode("utf-8")
+            n_items += 1
+            seen_items.add(hashlib.md5(text.encode("utf-8")).hexdigest())
+        n_uniq = len(seen_items)
+        if n_items:
+            print(f"  dup {label} bloque {self.block_idx}: {n_items} items, "
+                  f"{n_uniq} únicos ({100*(n_items-n_uniq)/n_items:.1f}% dup intra-chunk)")
         written = len(buf)
         self._check_md5(label, bytes(buf))
         with open(path, mode, encoding="utf-8") as f:
