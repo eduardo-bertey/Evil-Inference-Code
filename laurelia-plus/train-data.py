@@ -6,7 +6,9 @@ para el siguiente (+1). Al pedir un bloque se borran los archivos viejos, igual 
 dataset.py. NO toca ni modifica dataset.py.
 """
 
+import hashlib
 import importlib
+import json
 import os
 import threading
 from typing import Optional
@@ -36,6 +38,49 @@ class TrainData:
         self._block_pos: dict[str, int] = {"wiki": 0, "fine": 0, "tuit": 0}
         self._prefetch_thread: threading.Thread | None = None
         self._prefetch_error: Exception | None = None
+        # MD5 por fuente: detecta chunks repetidos (mismo md5 = mismo contenido).
+        self._md5_lock = threading.Lock()
+        self._seen_file = os.path.join(_DIR, "md5_seen.json")
+        self._md5_log = os.path.join(_DIR, "md5_log.jsonl")
+        self._seen: dict[str, set] = {"wiki": set(), "fine": set(), "tuit": set()}
+        self._load_seen()
+
+    def _load_seen(self):
+        try:
+            if os.path.exists(self._seen_file):
+                with open(self._seen_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for label in self._seen:
+                    self._seen[label] = set(data.get(label, []))
+                print(f"  MD5 vistos cargados: " +
+                      ", ".join(f"{k}={len(v)}" for k, v in self._seen.items()))
+        except Exception as e:
+            print(f"  MD5 seen no cargado: {e}")
+
+    def _save_seen(self):
+        try:
+            with open(self._seen_file, "w", encoding="utf-8") as f:
+                json.dump({k: sorted(v) for k, v in self._seen.items()}, f)
+        except Exception as e:
+            print(f"  MD5 seen no guardado: {e}")
+
+    def _check_md5(self, label: str, buf: bytes):
+        """Registra md5 del chunk de una fuente; alerta si se repite."""
+        if not buf:
+            return
+        h = hashlib.md5(buf).hexdigest()
+        with self._md5_lock:
+            if h in self._seen[label]:
+                print(f"  ALERTA MD5 repetido {label} bloque {self.block_idx} md5={h}")
+            else:
+                self._seen[label].add(h)
+            try:
+                with open(self._md5_log, "a", encoding="utf-8") as f:
+                    f.write(json.dumps({"block": self.block_idx, "label": label,
+                                        "md5": h, "bytes": len(buf)}) + "\n")
+            except Exception:
+                pass
+            self._save_seen()
 
     def _mod_for(self, label: str):
         if label == "wiki":
@@ -96,18 +141,20 @@ class TrainData:
         it = self._iters[label]
         max_bytes = int(self._mb_for(label) * 1024 * 1024)
         print(f"  Descargando {label} (bloque {self.block_idx}, {self._mb_for(label)}MB)...")
-        written = 0
+        buf = bytearray()
+        for item in it:
+            text = self._text_for(label, item)
+            tam = len(text.encode("utf-8"))
+            if tam > max_bytes:
+                print(f"  Skipping huge {label} item of {tam} bytes")
+                continue
+            if len(buf) + tam > max_bytes:
+                break
+            buf += text.encode("utf-8")
+        written = len(buf)
+        self._check_md5(label, bytes(buf))
         with open(path, mode, encoding="utf-8") as f:
-            for item in it:
-                text = self._text_for(label, item)
-                tam = len(text.encode("utf-8"))
-                if tam > max_bytes:
-                    print(f"  Skipping huge {label} item of {tam} bytes")
-                    continue
-                if written + tam > max_bytes:
-                    break
-                f.write(text)
-                written += tam
+            f.write(buf.decode("utf-8", errors="ignore"))
         print(f"  Escrito {label}: {written} bytes")
 
     def download_block(self):
