@@ -77,6 +77,24 @@ class HFDataManager:
         )
         print(f"  subido {self.repo_id}/data.{n}.txt")
 
+    def readme_exists(self) -> bool:
+        try:
+            return self._get_api().file_exists(
+                repo_id=self.repo_id, filename="README.md", repo_type="dataset")
+        except Exception:
+            return False
+
+    def upload_readme(self, local_path: str):
+        self._get_api().upload_file(
+            path_or_fileobj=local_path,
+            path_in_repo="README.md",
+            repo_id=self.repo_id,
+            repo_type="dataset",
+            token=self._get_token(),
+            commit_message="tarjeta del dataset (ES/EN)",
+        )
+        print(f"  subida tarjeta {self.repo_id}/README.md")
+
     def listar_bloques(self) -> list:
         """Nombres data.N.txt ordenados por N que hay en el repo."""
         import re
