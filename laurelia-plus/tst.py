@@ -18,6 +18,8 @@ import torch
 from torch import Tensor
 import torch.nn.functional as F
 
+_debug_done = False
+
 
 @dataclass
 class TSTConfig:
@@ -151,4 +153,11 @@ def folded_bag_ce(logits_fold: Tensor, labels: Tensor, s: int) -> Tensor:
     okf = ok.reshape(B * L, s).to(ce.dtype)
     ce = ce * okf
     valid = okf.sum(dim=-1, keepdim=True).clamp_min(1)
+    global _debug_done
+    if not _debug_done:
+        _debug_done = True
+        per_j = (ce.reshape(B * L, s) / valid.reshape(B * L, 1)).mean(dim=0)
+        print(f"  [DEBUG_TST] B={B} L={L} T={T} s={s} valid/pos={valid.float().mean().item():.2f}")
+        print(f"  [DEBUG_TST] CE medio por futuro j: {[round(float(v), 4) for v in per_j.tolist()]}")
+        print(f"  [DEBUG_TST] labels[0,:12]: {flat[:12].tolist()}")
     return (ce.sum(dim=-1, keepdim=True) / valid).sum()

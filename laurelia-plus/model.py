@@ -415,6 +415,11 @@ class LLM(nn.Module):
             input_ids = input_ids[:, :Tc]
             if labels is not None:
                 labels = labels[:, :Tc]
+            if not getattr(self, "_dbg", False):
+                self._dbg = True
+                print(f"  [DEBUG_TST] fwd B={B} T={T} L={L} Tc={Tc} fold={fold}")
+                print(f"  [DEBUG_TST] x[0,:8]={input_ids[0, :8].tolist()}")
+                print(f"  [DEBUG_TST] y[0,:8]={labels[0, :8].tolist() if labels is not None else None}")
             e = self.embeddings(input_ids)  # (B, Tc, D)
             # Superposición: promedio de cada grupo de `fold` embeddings (f32).
             x = e.float().view(B, L, fold, -1).mean(dim=2).to(e.dtype)
