@@ -46,6 +46,72 @@ MIXES = [
     (TWEETS_CONFIG, 9.1, "tuit"),
 ]
 
+_RE_URL = re.compile(r"https?://\S+|www\.\S+")
+_RE_MENCION = re.compile(r"@\w+")
+_RE_HASHTAG = re.compile(r"#\w+")
+_RE_ESPACIOS = re.compile(r"\s+")
+
+
+def limpiar_tuit(t):
+    """Saca URLs, @menciones y #hashtags; colapsa espacios."""
+    t = _RE_URL.sub("", t)
+    t = _RE_MENCION.sub("", t)
+    t = _RE_HASHTAG.sub("", t)
+    return _RE_ESPACIOS.sub(" ", t).strip()
+
+
+class BlockDataset(StreamingDataset):
+    """StreamingDataset de laurelia que registra bytes por fuente para porcentajes."""
+
+    def __init__(self, block_idx: int):
+        super().__init__(block_mb=0.0, block_idx=block_idx, mezcla=True, mixes=MIXES)
+        self.last_bytes: dict[str, int] = {}
+
+    def _append_mix_maybe(self, mix_path=None):
+        self.last_bytes = {}
+        if not getattr(self, "mezcla", False) or not self.mixes:
+            return
+        for _, mb, label in self.mixes:
+            if mb <= 0:
+                continue
+            mix_bytes = int(mb * 1024 * 1024)
+            print(f"  Descargando {label} (bloque {self.block_idx}, {mb}MB)...")
+            # Nunca None: espera y reintenta siempre hasta traer el cacho.
+            intento = 0
+            while True:
+                intento += 1
+                try:
+                    self._ensure_mix_iter(label)
+                    it = self._mix_iters.get(label)
+                    if it is None:
+                        print(f"  {label}: stream muerto, recreando (intento {intento})...")
+                        self._mix_iters.pop(label, None)
+                        time.sleep(5)
+                        continue
+                    texts, appended = self._read_from_mix_iter(label, mix_bytes)
+                    if not texts:
+                        print(f"  {label}: vacio, esperando 5s (intento {intento})...")
+                        time.sleep(5)
+                        continue
+                    break
+                except Exception as e:
+                    print(f"  {label} fallo ({e}), reintentando en 5s (intento {intento})...")
+                    self._mix_iters.pop(label, None)
+                    time.sleep(5)
+            if label == "tuit":
+                texts = [limpiar_tuit(t) for t in texts]
+                texts = [t for t in texts if t]
+                appended = sum(len(t.encode("utf-8")) for t in texts)
+                print(f"  tuit limpio (@/http/#/espacios): {len(texts)} tuits, {appended} bytes")
+            self.last_bytes[label] = appended
+            out_path = mix_path or self._path
+            with open(out_path, "a", encoding="utf-8") as f:
+                for t in texts:
+                    f.write(t)
+                    f.write("\n\n")
+            print(f"  Appended {appended} bytes from {label} for block {self.block_idx}")
+
+
 def armar_bloque(n, ds):
     """Descarga el bloque n con dataset.py y guarda data.{n}.txt (solo corpus)."""
 

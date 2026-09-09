@@ -1,3 +1,13 @@
+---
+license: other
+language:
+- es
+task_categories:
+- text-generation
+size_categories:
+- 10K<n<100K
+---
+
 # data-fine-es
 
 Bloques de pre-entrenamiento en español (~64MB c/u): conocimiento general + chat pelado.
