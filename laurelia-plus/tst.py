@@ -144,15 +144,17 @@ def folded_bag_ce(logits_fold: Tensor, labels: Tensor, s: int) -> Tensor:
     flat = labels.reshape(-1)  # [B*T]
     dev = logits_fold.device
     row = torch.arange(B, device=dev)[:, None, None] * T            # [B,1,1]
-    pos = (torch.arange(L, device=dev)[None, :, None] * s + (s - 1)
-           + torch.arange(s, device=dev)[None, None, :])              # [1,L,s]
-    # Comparación LOCAL (pos < T vale para todas las filas); el expand
-    # es solo forma: el +row va únicamente en idx (índices globales).
-    ok = pos.expand(B, L, s) < T                                     # [B,L,s]
+    # pos LOCAL (sin row): la misma máscara vale para todas las filas.
+    # k -> labels[k*s+s-1 : k*s+2s-1] (textos [ks+s, ks+2s-1]).
+    pos = (torch.arange(L, device=dev)[:, None] * s + (s - 1)
+           + torch.arange(s, device=dev)[None, :])                    # [L,s]
+    ok1 = pos < T                                                   # [L,s]
+    idx = (row + pos.clamp_max(T - 1)).reshape(B * L, s)
+    okf = ok1.unsqueeze(0).expand(B, L, s).reshape(B * L, s)
     idx = (row + pos.clamp_max(T - 1)).reshape(B * L, s)
     lse = torch.logsumexp(logits_fold.reshape(B * L, V), dim=-1, keepdim=True)
     ce = lse - logits_fold.reshape(B * L, V).gather(1, idx)          # [B*L, s]
-    okf = ok.reshape(B * L, s).to(ce.dtype)
+    okf = okf.to(ce.dtype)
     ce = ce * okf
     valid = okf.sum(dim=-1, keepdim=True).clamp_min(1)
     global _debug_done
