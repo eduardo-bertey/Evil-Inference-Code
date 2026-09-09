@@ -237,8 +237,11 @@ def main():
             fold = 1
             if tst_cfg.enabled:
                 FOLD = 4
-                w = torch.tensor([1.0, 0.5, 0.25, 0.125], device=x.device)
-                w = w / w.sum()  # media: paridad de escala con CE (estilo paper)
+                # Nuestro (geométrico normalizado): premia orden dentro del bag.
+                # w = torch.tensor([1.0, 0.5, 0.25, 0.125], device=x.device)
+                # w = w / w.sum()
+                # Paper (MCE uniforme): 1/4 por token del bag, sin orden.
+                w = torch.full((FOLD,), 1.0 / FOLD, device=x.device)
                 mtp_w = w
                 fold = FOLD
                 tst_tokens += tok_n
