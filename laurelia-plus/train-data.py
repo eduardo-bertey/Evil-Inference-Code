@@ -74,6 +74,7 @@ class TrainData:
                 print(f"  ALERTA MD5 repetido {label} bloque {self.block_idx} md5={h}")
             else:
                 self._seen[label].add(h)
+                print(f"  md5 {label} bloque {self.block_idx}: {h[:12]}... ({len(buf)}B)")
             try:
                 with open(self._md5_log, "a", encoding="utf-8") as f:
                     f.write(json.dumps({"block": self.block_idx, "label": label,
