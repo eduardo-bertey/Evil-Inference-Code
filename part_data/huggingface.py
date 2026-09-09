@@ -84,6 +84,24 @@ class HFDataManager:
         except Exception:
             return False
 
+    def sync_readme(self, local_path: str):
+        """Sube README.md solo si falta o difiere del remoto."""
+        try:
+            if self.readme_exists():
+                remote = hf_hub_download(repo_id=self.repo_id, filename="README.md",
+                                         repo_type="dataset", token=self._get_token())
+                with open(remote, "r", encoding="utf-8") as f:
+                    r = f.read()
+                with open(local_path, "r", encoding="utf-8") as f:
+                    l = f.read()
+                if r == l:
+                    print("  README.md igual al remoto, no se toca.")
+                    return
+                print("  README.md difiere del remoto, actualizando...")
+            self.upload_readme(local_path)
+        except Exception as e:
+            print(f"  no se pudo sincronizar README.md: {e}")
+
     def upload_readme(self, local_path: str):
         self._get_api().upload_file(
             path_or_fileobj=local_path,

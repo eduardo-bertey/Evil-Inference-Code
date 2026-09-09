@@ -169,10 +169,10 @@ def main():
     if SUBIR:
         hf.ensure_repo()
         card = os.path.join(_DIR, "README.md")
-        if os.path.exists(card) and not hf.readme_exists():
-            hf.upload_readme(card)
+        if os.path.exists(card):
+            hf.sync_readme(card)
         else:
-            print("  README.md ya existe en el repo, no se toca.")
+            print("  sin README.md local, no se toca la tarjeta.")
 
     ds = BlockDataset(block_idx=BLOQUE_INICIAL)
 
