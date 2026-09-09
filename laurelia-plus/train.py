@@ -125,7 +125,6 @@ def main():
     ckpt_block = 0
     tst_tokens = 0
     dense_tokens = 0
-    ckpt_sched = None  # estado del scheduler (paper: mismo optimizador entre fases)
 
     if not test_mode:
         loaded = False
@@ -138,13 +137,6 @@ def main():
             ckpt_block = ckpt.get("block", 0)
             tst_tokens = ckpt.get("tst_tokens", 0)
             dense_tokens = ckpt.get("dense_tokens", 0)
-            if "optim" in ckpt:
-                try:
-                    optimizer.load_state_dict(ckpt["optim"])
-                    print("  Optimizer restaurado del checkpoint (paper: continuo entre fases)")
-                except Exception as e:
-                    print(f"  Optimizer no restaurado: {e}")
-            ckpt_sched = ckpt.get("sched")
             del ckpt
             torch.cuda.empty_cache()
             print(f"Loaded checkpoint: step {step} epoch {epoch} block {ckpt_block} tst {tst_tokens:,} dense {dense_tokens:,}")
@@ -158,13 +150,6 @@ def main():
             ckpt_block = ckpt.get("block", 0)
             tst_tokens = ckpt.get("tst_tokens", 0)
             dense_tokens = ckpt.get("dense_tokens", 0)
-            if "optim" in ckpt:
-                try:
-                    optimizer.load_state_dict(ckpt["optim"])
-                    print("  Optimizer restaurado del checkpoint (paper: continuo entre fases)")
-                except Exception as e:
-                    print(f"  Optimizer no restaurado: {e}")
-            ckpt_sched = ckpt.get("sched")
             del ckpt
             torch.cuda.empty_cache()
             print(f"Loaded HF checkpoint: step {step} epoch {epoch} block {ckpt_block} tst {tst_tokens:,} dense {dense_tokens:,}")
