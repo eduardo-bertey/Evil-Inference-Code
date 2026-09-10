@@ -47,6 +47,13 @@ class Config:
     betas: tuple = (0.9, 0.95)
     warm_up: int = 50
 
+    # Calibración CACT: CE next-token corto vivo durante TST (ancla la cabeza).
+    tst_calib_len: int = 512   # 2048/4: un batch extra por optimizer-step
+    tst_calib_base: float = 0.3
+    tst_calib_min: float = 0.0
+    tst_calib_max: float = 0.5
+    tst_calib_ema: float = 0.98
+
 
 # ─── MLA (port de moe-plus/mla_attention.py) ─────────────────────────────
 
@@ -355,8 +362,40 @@ class LLM(nn.Module):
         self.lm_head = nn.Linear(config.dim, config.emb_num, bias=False)
         self.embeddings.weight = self.lm_head.weight
 
+        # Composer CACT (solo TST): z = media + a_ord*r_ord + a_jer*r_jer.
+        # tst_slot arranca en ceros -> residual de orden 0 exacto (identidad:
+        # equivale a la media pelada, ckpt viejo compatible). El residual
+        # jerárquico arranca apagado (a_jer=0.0) porque sí movería z de entrada.
+        self.tst_slot = nn.Embedding(4, config.dim)
+        self.tst_order_alpha = 0.1
+        self.tst_hier_alpha = 0.0
+        self.tst_hier_block = 8
+
         self.apply(self._init_weights)
+        with torch.no_grad():
+            self.tst_slot.weight.zero_()
         print("Number of parameters: %.2fM" % (sum(p.numel() for p in self.parameters()) / 1e6,))
+
+    def _tst_compose(self, ef):
+        """ef: [B, L, s, D] float. Devuelve [B, L, D] float."""
+        s = ef.size(2)
+        z_mean = ef.mean(dim=2)
+        if s > 4:
+            return z_mean
+        w = torch.tanh(self.tst_slot.weight[:s].float())  # [s, D]
+        w = w - w.mean(dim=0, keepdim=True)               # cero-media: init 0 exacto
+        delta = ef - z_mean.unsqueeze(2)
+        z = z_mean + self.tst_order_alpha * (delta * w).sum(dim=2) / s
+        if self.tst_hier_alpha != 0.0:
+            B, L, D = z.shape
+            blk = self.tst_hier_block
+            pad = (-L) % blk
+            zw = F.pad(z, (0, 0, 0, pad)) if pad else z
+            bw = zw.view(B, -1, blk, D)
+            idx = torch.arange(1, blk + 1, device=z.device).view(1, 1, blk, 1)
+            cs = bw.cumsum(dim=2) / idx
+            z = z + self.tst_hier_alpha * (cs.view(B, -1, D)[:, :L, :] - z)
+        return z
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -421,8 +460,9 @@ class LLM(nn.Module):
                 print(f"  [DEBUG_TST] x[0,:8]={input_ids[0, :8].tolist()}")
                 print(f"  [DEBUG_TST] y[0,:8]={labels[0, :8].tolist() if labels is not None else None}")
             e = self.embeddings(input_ids)  # (B, Tc, D)
-            # Superposición: promedio de cada grupo de `fold` embeddings (f32).
-            x = e.float().view(B, L, fold, -1).mean(dim=2).to(e.dtype)
+            # Superposición CACT: media + residual de orden (init identidad).
+            ef = e.float().view(B, L, fold, -1)
+            x = self._tst_compose(ef).to(e.dtype)
         else:
             x = self.embeddings(input_ids)
 

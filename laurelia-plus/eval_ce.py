@@ -50,7 +50,11 @@ print(f"ckpt: step {ckpt.get('step')} tst {ckpt.get('tst_tokens', 0):,} dense {c
 del ckpt
 
 bi = input("Block: ").strip()
-sd = train_data.TrainData(block_idx=int(bi) if bi else 0)
+try:
+    block_idx = int(bi) if bi else 0
+except ValueError:
+    block_idx = 0
+sd = train_data.TrainData(block_idx=block_idx)
 sd.load_tokens(tokenizer)
 tokens = sd.get_tokens()
 seq_len = config.block_size

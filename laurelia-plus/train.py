@@ -203,6 +203,9 @@ def main():
     t0 = time.time()
     last_rpt_time = t0
     last_rpt_step = 0
+    calib_ema = 1.0  # CACT: EMA del ratio calib/MCE
+    calib_w = config.tst_calib_base
+    calib_last = 0.0
 
     while True:
         if test_mode:
@@ -250,8 +253,24 @@ def main():
                 dense_tokens += tok_n
                 mtp_tag = ""
             logits, loss, aux = model(x, labels=y, mtp_weights=mtp_w, fold=fold)
-            ((loss + aux) / config.grad_acc).backward()
+            # Calibración CACT: un batch extra corto (512) en CE puro, una vez
+            # por optimizer-step (último micro del ciclo). Ancla la cabeza a
+            # semántica next-token para que no derive filosa. Peso adaptativo:
+            # fuerte cuando calib>>MCE (deriva), suave cuando convergen.
+            calib_val = 0.0
+            if tst_cfg.enabled and ((batch_start // config.batch_size + 1) % config.grad_acc == 0 or batch_end >= n_seq):
+                CL = config.tst_calib_len
+                logits_c, loss_c, _ = model(x[:, :CL], labels=y[:, :CL], fold=1)
+                calib_val = loss_c.item()
+                ratio = calib_val / max(loss.item(), 1e-8)
+                calib_ema = config.tst_calib_ema * calib_ema + (1.0 - config.tst_calib_ema) * ratio
+                calib_w = min(max(config.tst_calib_base * calib_ema, config.tst_calib_min), config.tst_calib_max)
+                ((loss + aux + calib_w * loss_c) / config.grad_acc).backward()
+                del logits_c, loss_c
+            else:
+                ((loss + aux) / config.grad_acc).backward()
             loss_val = loss.item()
+            calib_last = calib_val
             del logits, loss
 
             if (batch_start // config.batch_size + 1) % config.grad_acc == 0 or batch_end >= n_seq:
@@ -268,7 +287,8 @@ def main():
                     tok = (step - last_rpt_step) * config.batch_size * config.grad_acc * seq_len
                     tps = tok / max(now - last_rpt_time, 0.001)
                     wr = model.width_report()
-                    print(f"s{step} loss {loss_val:.4f} lr {lr_curr:.6f} grad {grad_norm:.3f} {tps:.0f}t/s tst {tst_tokens/1e6:.1f}M/{dense_tokens/1e6:.1f}M W{wr} {mtp_tag}")
+                    caltag = f" cal{calib_last:.2f} w{calib_w:.2f}" if tst_cfg.enabled else ""
+                    print(f"s{step} loss {loss_val:.4f} lr {lr_curr:.6f} grad {grad_norm:.3f} {tps:.0f}t/s tst {tst_tokens/1e6:.1f}M/{dense_tokens/1e6:.1f}M W{wr} {mtp_tag}{caltag}")
                     last_rpt_time = now
                     last_rpt_step = step
                     pm.log(step, loss_val, lr_curr, tps)
