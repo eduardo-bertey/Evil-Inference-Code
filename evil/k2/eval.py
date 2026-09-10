@@ -10,12 +10,10 @@ import os
 import sys
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_DIR, "..", "..", "Evil-Inference-Code", "laurelia-plus"))
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import importlib
-train_data = importlib.import_module("train-data")
+import train_data
 
 BASE = "IFM/K2-Horizon-0.9B"
 SEQ = 2048
