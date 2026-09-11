@@ -48,11 +48,13 @@ def ask(msg, max_new=2048, reset=False):
     t0 = time.time()
     with torch.no_grad():
         out = model.generate(**inp, max_new_tokens=max_new, temperature=0.6,
-                             top_p=0.95, do_sample=True)
+                             top_p=0.95, do_sample=True,
+                             repetition_penalty=1.1, no_repeat_ngram_size=16)
     dt = time.time() - t0
     new_toks = out[0].shape[0] - inp["input_ids"].shape[1]
     ans = tok.decode(out[0][inp["input_ids"].shape[1]:], skip_special_tokens=False)
-    _history.append({"role": "assistant", "content": ans})
+    # Historial truncado: el pensamiento crudo no vuelve entero (retroalimenta loops).
+    _history.append({"role": "assistant", "content": ans[-1500:]})
     print(ans)
     print(f"[{new_toks} toks en {dt:.1f}s = {new_toks / max(dt, 1e-3):.1f} t/s | VRAM: {torch.cuda.memory_allocated() / 1e9:.2f}GB]")
     return ans

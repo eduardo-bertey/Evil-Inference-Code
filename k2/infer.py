@@ -41,9 +41,10 @@ while True:
     inp.pop("token_type_ids", None)
     with torch.no_grad():
         out = model.generate(**inp, max_new_tokens=max_new, temperature=0.6,
-                             top_p=0.95, do_sample=True)
+                             top_p=0.95, do_sample=True,
+                             repetition_penalty=1.1, no_repeat_ngram_size=16)
     gen = out[0][inp["input_ids"].shape[1]:]
     ans = tok.decode(gen, skip_special_tokens=False)
     print(f"\nk2> {ans}")
     print(f"[VRAM: {torch.cuda.memory_allocated() / 1e9:.2f}GB]")
-    history.append({"role": "assistant", "content": ans})
+    history.append({"role": "assistant", "content": ans[-1500:]})
