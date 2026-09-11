@@ -44,13 +44,17 @@ def ask(msg, max_new=2048, reset=False):
                                    chat_template_kwargs={"reasoning_effort": "high"})
     inp = tok(text, return_tensors="pt").to(model.device)
     inp.pop("token_type_ids", None)
+    import time
+    t0 = time.time()
     with torch.no_grad():
         out = model.generate(**inp, max_new_tokens=max_new, temperature=0.6,
                              top_p=0.95, do_sample=True)
+    dt = time.time() - t0
+    new_toks = out[0].shape[0] - inp["input_ids"].shape[1]
     ans = tok.decode(out[0][inp["input_ids"].shape[1]:], skip_special_tokens=False)
     _history.append({"role": "assistant", "content": ans})
     print(ans)
-    print(f"[VRAM: {torch.cuda.memory_allocated() / 1e9:.2f}GB]")
+    print(f"[{new_toks} toks en {dt:.1f}s = {new_toks / max(dt, 1e-3):.1f} t/s | VRAM: {torch.cuda.memory_allocated() / 1e9:.2f}GB]")
     return ans
 
 
