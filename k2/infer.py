@@ -34,6 +34,11 @@ except Exception as e:
     )
 model.eval()
 model.config.use_cache = True
+try:
+    model = torch.compile(model, mode="reduce-overhead")
+    print("torch.compile: on")
+except Exception as e:
+    print(f"torch.compile no ({e}), sigo sin compilar")
 print(f"Modelo en: {model.device} | VRAM: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
 print("Chat listo (salir = terminar).")
 
