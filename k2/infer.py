@@ -8,18 +8,30 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 BASE = "IFM/K2-Horizon-0.9B"
 max_new = 2048
+effort = "high"
 for a in sys.argv[1:]:
     if a.startswith("--max-new"):
         max_new = int(a.split("=")[1])
+    if a.startswith("--effort"):
+        effort = a.split("=")[1]
 
 assert torch.cuda.is_available(), "sin CUDA: este script exige GPU"
 print(f"GPU: {torch.cuda.get_device_name(0)}")
 
 tok = AutoTokenizer.from_pretrained(BASE, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(
-    BASE, device_map="cuda:0", dtype=torch.bfloat16,
-    low_cpu_mem_usage=True, trust_remote_code=True,
-)
+try:
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE, device_map="cuda:0", dtype=torch.bfloat16,
+        low_cpu_mem_usage=True, trust_remote_code=True,
+        attn_implementation="sdpa",
+    )
+    print("attn: sdpa")
+except Exception as e:
+    print(f"attn sdpa no soportado ({e}), eager")
+    model = AutoModelForCausalLM.from_pretrained(
+        BASE, device_map="cuda:0", dtype=torch.bfloat16,
+        low_cpu_mem_usage=True, trust_remote_code=True,
+    )
 model.eval()
 print(f"Modelo en: {model.device} | VRAM: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
 print("Chat listo (salir = terminar).")
@@ -36,7 +48,7 @@ while True:
         continue
     history.append({"role": "user", "content": msg})
     text = tok.apply_chat_template(history, tokenize=False, add_generation_prompt=True,
-                                   chat_template_kwargs={"reasoning_effort": "high"})
+                                   chat_template_kwargs={"reasoning_effort": effort})
     inp = tok(text, return_tensors="pt").to(model.device)
     inp.pop("token_type_ids", None)
     import time

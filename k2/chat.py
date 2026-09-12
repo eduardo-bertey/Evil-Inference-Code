@@ -25,23 +25,32 @@ def load():
     assert torch.cuda.is_available(), "sin CUDA"
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     _tok = AutoTokenizer.from_pretrained(BASE, trust_remote_code=True)
-    _model = AutoModelForCausalLM.from_pretrained(
-        BASE, device_map="cuda:0", dtype=torch.bfloat16,
-        low_cpu_mem_usage=True, trust_remote_code=True,
-    )
+    try:
+        _model = AutoModelForCausalLM.from_pretrained(
+            BASE, device_map="cuda:0", dtype=torch.bfloat16,
+            low_cpu_mem_usage=True, trust_remote_code=True,
+            attn_implementation="sdpa",  # T4: mem-efficient > eager (FA2 no existe en sm75)
+        )
+        print("attn: sdpa")
+    except Exception as e:
+        print(f"attn sdpa no soportado ({e}), eager")
+        _model = AutoModelForCausalLM.from_pretrained(
+            BASE, device_map="cuda:0", dtype=torch.bfloat16,
+            low_cpu_mem_usage=True, trust_remote_code=True,
+        )
     _model.eval()
     print(f"VRAM: {torch.cuda.memory_allocated() / 1e9:.2f}GB (queda cargado)")
     return _model, _tok
 
 
-def ask(msg, max_new=2048, reset=False):
+def ask(msg, max_new=2048, reset=False, effort="high"):
     global _history
     model, tok = load()
     if reset:
         _history = []
     _history.append({"role": "user", "content": msg})
     text = tok.apply_chat_template(_history, tokenize=False, add_generation_prompt=True,
-                                   chat_template_kwargs={"reasoning_effort": "high"})
+                                   chat_template_kwargs={"reasoning_effort": effort})
     inp = tok(text, return_tensors="pt").to(model.device)
     inp.pop("token_type_ids", None)
     import time
