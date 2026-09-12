@@ -48,7 +48,7 @@ def load():
     return _model, _tok
 
 
-def ask(msg, max_new=2048, reset=False, effort="off"):
+def ask(msg, max_new=2048, reset=False, effort="high"):
     global _history
     model, tok = load()
     if reset:

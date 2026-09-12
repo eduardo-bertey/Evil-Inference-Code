@@ -8,7 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 BASE = "IFM/K2-Horizon-0.9B"
 max_new = 2048
-effort = "off"
+effort = "high"
 for a in sys.argv[1:]:
     if a.startswith("--max-new"):
         max_new = int(a.split("=")[1])
