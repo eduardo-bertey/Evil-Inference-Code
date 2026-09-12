@@ -23,7 +23,8 @@ def load():
     if _model is not None:
         return _model, _tok
     assert torch.cuda.is_available(), "sin CUDA"
-    print(f"GPU: {torch.cuda.get_device_name(0)}")
+    import transformers
+    print(f"GPU: {torch.cuda.get_device_name(0)} | torch {torch.__version__} | transformers {transformers.__version__} (tarjeta valida 5.15.0+torch 2.13.0)")
     _tok = AutoTokenizer.from_pretrained(BASE, trust_remote_code=True)
     try:
         _model = AutoModelForCausalLM.from_pretrained(
