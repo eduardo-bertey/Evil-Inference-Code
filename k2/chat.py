@@ -39,6 +39,11 @@ def load():
             low_cpu_mem_usage=True, trust_remote_code=True,
         )
     _model.eval()
+    try:
+        _model = torch.compile(_model, mode="reduce-overhead")
+        print("torch.compile: on")
+    except Exception as e:
+        print(f"torch.compile no ({e}), sigo sin compilar")
     print(f"VRAM: {torch.cuda.memory_allocated() / 1e9:.2f}GB (queda cargado)")
     return _model, _tok
 
