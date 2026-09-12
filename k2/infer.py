@@ -33,6 +33,7 @@ except Exception as e:
         low_cpu_mem_usage=True, trust_remote_code=True,
     )
 model.eval()
+model.config.use_cache = True
 print(f"Modelo en: {model.device} | VRAM: {torch.cuda.memory_allocated() / 1e9:.2f}GB")
 print("Chat listo (salir = terminar).")
 
@@ -61,7 +62,7 @@ while True:
     with torch.no_grad():
         out = model.generate(**inp, max_new_tokens=max_new, temperature=temp,
                              top_p=0.95, do_sample=True,
-                             repetition_penalty=1.1, no_repeat_ngram_size=16)
+                             repetition_penalty=1.1, use_cache=True)
     dt = time.time() - t0
     new_toks = out[0].shape[0] - inp["input_ids"].shape[1]
     gen = out[0][inp["input_ids"].shape[1]:]

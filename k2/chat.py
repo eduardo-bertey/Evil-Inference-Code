@@ -39,6 +39,7 @@ def load():
             low_cpu_mem_usage=True, trust_remote_code=True,
         )
     _model.eval()
+    _model.config.use_cache = True
     try:
         _model = torch.compile(_model, mode="reduce-overhead")
         print("torch.compile: on")
@@ -69,7 +70,7 @@ def ask(msg, max_new=2048, reset=False, effort="high"):
     with torch.no_grad():
         out = model.generate(**inp, max_new_tokens=max_new, temperature=temp,
                              top_p=0.95, do_sample=True,
-                             repetition_penalty=1.1, no_repeat_ngram_size=16)
+                             repetition_penalty=1.1, use_cache=True)
     dt = time.time() - t0
     new_toks = out[0].shape[0] - inp["input_ids"].shape[1]
     ans = tok.decode(out[0][inp["input_ids"].shape[1]:], skip_special_tokens=False)
