@@ -8,7 +8,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 BASE = "IFM/K2-Horizon-0.9B"
 max_new = 2048
-effort = "high"
+effort = "off"
 for a in sys.argv[1:]:
     if a.startswith("--max-new"):
         max_new = int(a.split("=")[1])
@@ -47,14 +47,19 @@ while True:
     if not msg:
         continue
     history.append({"role": "user", "content": msg})
-    text = tok.apply_chat_template(history, tokenize=False, add_generation_prompt=True,
-                                   chat_template_kwargs={"reasoning_effort": effort})
+    if effort == "off":
+        text = tok.apply_chat_template(history, tokenize=False, add_generation_prompt=True)
+        temp = 1.0
+    else:
+        text = tok.apply_chat_template(history, tokenize=False, add_generation_prompt=True,
+                                       chat_template_kwargs={"reasoning_effort": effort})
+        temp = 0.6
     inp = tok(text, return_tensors="pt").to(model.device)
     inp.pop("token_type_ids", None)
     import time
     t0 = time.time()
     with torch.no_grad():
-        out = model.generate(**inp, max_new_tokens=max_new, temperature=0.6,
+        out = model.generate(**inp, max_new_tokens=max_new, temperature=temp,
                              top_p=0.95, do_sample=True,
                              repetition_penalty=1.1, no_repeat_ngram_size=16)
     dt = time.time() - t0

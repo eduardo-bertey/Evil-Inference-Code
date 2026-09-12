@@ -48,20 +48,26 @@ def load():
     return _model, _tok
 
 
-def ask(msg, max_new=2048, reset=False, effort="high"):
+def ask(msg, max_new=2048, reset=False, effort="off"):
     global _history
     model, tok = load()
     if reset:
         _history = []
     _history.append({"role": "user", "content": msg})
-    text = tok.apply_chat_template(_history, tokenize=False, add_generation_prompt=True,
-                                   chat_template_kwargs={"reasoning_effort": effort})
+    if effort == "off":
+        # Tarjeta HF: para generate plano, parsers off (sin reasoning).
+        text = tok.apply_chat_template(_history, tokenize=False, add_generation_prompt=True)
+        temp = 1.0
+    else:
+        text = tok.apply_chat_template(_history, tokenize=False, add_generation_prompt=True,
+                                       chat_template_kwargs={"reasoning_effort": effort})
+        temp = 0.6
     inp = tok(text, return_tensors="pt").to(model.device)
     inp.pop("token_type_ids", None)
     import time
     t0 = time.time()
     with torch.no_grad():
-        out = model.generate(**inp, max_new_tokens=max_new, temperature=0.6,
+        out = model.generate(**inp, max_new_tokens=max_new, temperature=temp,
                              top_p=0.95, do_sample=True,
                              repetition_penalty=1.1, no_repeat_ngram_size=16)
     dt = time.time() - t0
