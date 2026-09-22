@@ -117,8 +117,12 @@ def main():
         mose.set_force_full(model, False)
         prism.freeze_except_layers(model, selected)
         n_params = prism.trainable_parameter_count(model)
+        n_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+        assert all(p.grad is None for p in model.parameters() if not p.requires_grad), \
+            "fuga de grads en congeladas"
         print(f"PRiSM bloque {sd.block_idx}: entrenan capas {selected} "
-              f"(+embed/norms/head) | {n_params:,} params")
+              f"(+embed/norms/head) | {n_params:,} params | "
+              f"congeladas {n_frozen:,} sin grad ✓")
         new_opt = torch.optim.AdamW(
             (p for p in model.parameters() if p.requires_grad), lr=lr_val)
         new_opt.zero_grad()
