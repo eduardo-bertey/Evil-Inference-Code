@@ -170,6 +170,8 @@ def run_prism_selection(model, token_ids, k: int, seq_len: int,
                     attention_mask=batch["attention_mask"],
                     output_hidden_states=True, return_dict=True)
         hs = getattr(out, "hidden_states", None)
+        print(f"  PRiSM batch {bi + 1}: hidden_states={'SI' if hs else 'NO (hooks)'}",
+              flush=True)
         if hs is None:
             # Forward custom que no devuelve hidden_states: hooks por capa.
             hs = [None] + _hidden_states_via_hooks(
