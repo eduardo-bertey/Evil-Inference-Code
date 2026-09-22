@@ -155,7 +155,7 @@ def _hidden_states_via_hooks(model, layers, input_ids, attention_mask):
 @torch.no_grad()
 def run_prism_selection(model, token_ids, k: int, seq_len: int,
                         device: torch.device, pad_id: int,
-                        n_batches: int = 4, batch_size: int = 2,
+                        n_batches: int = 4, batch_size: int = 8,
                         layer_getter: Optional[Callable] = None) -> List[int]:
     """Pipeline completo: batches del dataset -> scores -> top-1 por bloque."""
     was_training = model.training
