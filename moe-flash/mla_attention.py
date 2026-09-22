@@ -347,6 +347,9 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         return self.o_proj(attn_out), (C_KV_local, K_rot_full, prefilled)
 
     def forward_with_cache_partial(self, x, offset, cache, rotary_pct):
+        # Solo-xKV: con coordinator activo, todo cache va por xKV (nada full).
+        if self.xkv_coord is not None:
+            return self.forward_with_cache(x, offset, cache)
         B, S_new, _ = x.shape
         down = self.qkv.W_down(x)
         C_Q_new, C_KV_new, K_rot_raw = down.split([self.qkv.d_c1, self.qkv.d_c, self.qkv.d_rotate], dim=-1)
