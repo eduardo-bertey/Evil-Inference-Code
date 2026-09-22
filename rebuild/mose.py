@@ -56,7 +56,7 @@ class DenseWidthMoSE(nn.Module):
         N = B * T
         xf = x.reshape(N, C)
 
-        logits = self.router(xf)
+        logits = self.router(xf.to(self.router.weight.dtype))
         if self.training and self.noise_std > 0:
             logits = logits + torch.randn_like(logits) * self.noise_std
         biased = logits + self.route_bias.to(logits.dtype)
