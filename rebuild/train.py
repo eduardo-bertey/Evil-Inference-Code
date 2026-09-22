@@ -138,6 +138,7 @@ def main():
     aux_r_log = 0.0
     t0 = time.time()
     model.train()
+    print("Entrenando... (el primer step tarda, CUDA calienta)", flush=True)
     while step < max_steps:
         tokens = sd.get_tokens()
         n_seq = (len(tokens) - SEQ - 1) // SEQ
@@ -180,7 +181,7 @@ def main():
                 opt.step()
                 opt.zero_grad()
                 step += 1
-                if step % 10 == 0:
+                if step == 1 or step % 10 == 0:
                     dt = time.time() - t0
                     print(f"s{step} loss {loss.item():.4f} "
                           f"mose_aux r={aux_r_log:.5f} f={aux_log:.5f} "
