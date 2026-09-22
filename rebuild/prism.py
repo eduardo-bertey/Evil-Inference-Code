@@ -119,17 +119,32 @@ def print_prism_result(scores: torch.Tensor, selected: Sequence[int]):
 
 def build_batches(token_ids: List[int], seq_len: int, batch_size: int,
                   pad_id: int, device: torch.device, n_batches: int = 4):
-    """Corta seqs de seq_len de la lista de ids y arma dicts con attention_mask."""
-    need = n_batches * batch_size * seq_len
-    ids = list(token_ids[:need])
-    ids += [pad_id] * max(0, need - len(ids))
+    """Seqs de inicio, medio y fin del bloque (tercios) + attention_mask."""
+    n_seqs = n_batches * batch_size
+    n0 = (n_seqs + 2) // 3  # inicio
+    n1 = (n_seqs + 1) // 3  # medio
+    n2 = n_seqs - n0 - n1   # final
+    L = len(token_ids)
+
+    def take(start_idx: int, count: int):
+        out = []
+        for i in range(count):
+            s = list(token_ids[start_idx + i * seq_len:start_idx + (i + 1) * seq_len])
+            if len(s) < seq_len:
+                s += [pad_id] * (seq_len - len(s))
+            out.append(s)
+        return out
+
+    mid_start = max(0, L // 2 - (n1 * seq_len) // 2)
+    end_start = max(0, L - n2 * seq_len)
+    seqs = take(0, n0) + take(mid_start, n1) + take(end_start, n2)
+
     batches = []
     for b in range(n_batches):
-        xs, ms = [], []
-        for j in range(batch_size):
-            s = ids[(b * batch_size + j) * seq_len:(b * batch_size + j + 1) * seq_len]
-            xs.append(torch.tensor(s, dtype=torch.long))
-            ms.append(torch.tensor([1 if t != pad_id else 0 for t in s], dtype=torch.long))
+        chunk = seqs[b * batch_size:(b + 1) * batch_size]
+        xs = [torch.tensor(s, dtype=torch.long) for s in chunk]
+        ms = [torch.tensor([1 if t != pad_id else 0 for t in s], dtype=torch.long)
+              for s in chunk]
         batches.append({"input_ids": torch.stack(xs).to(device),
                         "attention_mask": torch.stack(ms).to(device)})
     return batches
