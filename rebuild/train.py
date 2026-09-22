@@ -126,13 +126,13 @@ def main():
             torch.cuda.empty_cache()
         return setup_block()
 
+    step = int(saved.get("step", 0))
     opt = setup_block()
     print("Optimizer: AdamW (solo entrenables, nuevo por bloque)")
     save_state()
 
     run_steps = int(input("Steps [500]: ").strip() or 500)
-    max_steps = int(saved.get("step", 0)) + run_steps
-    step = int(saved.get("step", 0))
+    max_steps = step + run_steps
     epoch = 0
     aux_log = 0.0
     aux_r_log = 0.0
