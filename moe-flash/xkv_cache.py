@@ -26,6 +26,9 @@ class XKVConfig:
     local_window: int = 32
     outlier_budget: int | None = None
     enabled: bool = True
+    # Train bajo compresion: fake SVD por capa (con grad) en el forward.
+    # Cross-layer solo existe en inferencia (prefill post-hoc, sin grad).
+    train_fake_svd: bool = False
 
     def __post_init__(self):
         if self.sparse_budget % self.chunk_size != 0:

@@ -84,6 +84,7 @@ xkv_rank_v = 128        # rank SVD values
 xkv_sparse_budget = 2048  # tokens reconstruidos por decode
 xkv_chunk_size = 8      # tokens por landmark chunk
 xkv_local_window = 32   # ventana local densa (latents MLA)
+xkv_train_fake_svd = True  # train bajo compresion SVD (solo K contenido + V, jamas RoPE)
 
 tok_path = os.path.join(_DIR, "tokenizer.json")
 
@@ -195,6 +196,7 @@ def main():
         xkv_sparse_budget=xkv_sparse_budget,
         xkv_chunk_size=xkv_chunk_size,
         xkv_local_window=xkv_local_window,
+        xkv_train_fake_svd=xkv_train_fake_svd,
     ).to(device).to(dtype=dtype)
 
     # Weight decay groups: biases + norms no decay, weights sí

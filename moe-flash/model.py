@@ -94,6 +94,7 @@ class TransformerLM(nn.Module):
         xkv_sparse_budget: int = 2048,
         xkv_chunk_size: int = 8,
         xkv_local_window: int = 32,
+        xkv_train_fake_svd: bool = False,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -118,6 +119,7 @@ class TransformerLM(nn.Module):
                 chunk_size=xkv_chunk_size,
                 local_window=xkv_local_window,
                 enabled=True,
+                train_fake_svd=xkv_train_fake_svd,
             )
         self.xkv_cfg = xkv_cfg
         self.xkv_coord: XVKSRCoordinator | None = None

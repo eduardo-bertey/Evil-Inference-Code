@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 from rope import RoPE, apply_rope_partial
 from attention import repeat_kv
-from xkv_cache import XKVConfig, XVKSRCoordinator
+from xkv_cache import XKVConfig, XVKSRCoordinator, fake_svd
 
 
 class RMSNorm(nn.Module):
@@ -177,6 +177,14 @@ class MultiHeadLatentAttentionGQA(nn.Module):
         Q_state, Q_rotate, K, V, K_rotate = self.qkv(x)
         Q_rotate, K_rotate = self.rope(Q_rotate, K_rotate, offset)
         B, T = x.shape[0], x.shape[1]
+
+        # Train bajo compresion xKV: fake SVD por capa SOLO en K contenido y V
+        # (K_rotate/RoPE jamas se comprime). Con grad, para que los pesos se adapten.
+        if self.xkv_cfg is not None and self.xkv_cfg.train_fake_svd and T > 1:
+            K = fake_svd(K.reshape(B, T, -1), self.xkv_cfg.rank_k).reshape(
+                B, T, self.num_kv_groups, self.head_dim)
+            V = fake_svd(V.reshape(B, T, -1), self.xkv_cfg.rank_v).reshape(
+                B, T, self.num_kv_groups, self.head_dim)
 
         if self.qk_norm:
             Q_state = self.q_norm(Q_state)
