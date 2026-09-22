@@ -182,7 +182,6 @@ def main():
             loss_r = float(out_r.loss.detach())
             aux_r_log = float(aux_r.detach()) if torch.is_tensor(aux_r) else float(aux_r)
             del out_r, aux_r
-            torch.cuda.empty_cache()  # libera pico del pass 1 antes del pass 2
             mose.set_force_full(model, True)
             out_f = model(input_ids=x, labels=y)
             aux_f = mose.collect_aux_loss(model)
