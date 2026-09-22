@@ -160,9 +160,12 @@ def run_prism_selection(model, token_ids, k: int, seq_len: int,
     """Pipeline completo: batches del dataset -> scores -> top-1 por bloque."""
     was_training = model.training
     model.eval()
+    layers = get_transformer_layers(model)
+    print(f"PRiSM: {len(layers)} capas, {n_batches} batches calibracion...", flush=True)
     batches = build_batches(token_ids, seq_len, batch_size, pad_id, device, n_batches)
     total, n = None, 0
-    for batch in batches:
+    for bi, batch in enumerate(batches):
+        print(f"  PRiSM batch {bi + 1}/{len(batches)}...", flush=True)
         out = model(input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
                     output_hidden_states=True, return_dict=True)
