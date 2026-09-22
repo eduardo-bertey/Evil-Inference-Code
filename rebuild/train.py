@@ -115,6 +115,8 @@ def main():
         selected = prism.run_prism_selection(
             model, sd.get_tokens(), k_sel, SEQ, device, hf_tok.pad_token_id)
         mose.set_force_full(model, False)
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()  # libera lo reservado por la seleccion
         prism.freeze_except_layers(model, selected)
         n_params = prism.trainable_parameter_count(model)
         n_frozen = sum(p.numel() for p in model.parameters() if not p.requires_grad)
