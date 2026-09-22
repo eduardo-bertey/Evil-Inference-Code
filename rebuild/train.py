@@ -153,6 +153,7 @@ def main():
     aux_log = 0.0
     aux_r_log = 0.0
     t0 = time.time()
+    last_rpt_step = step
     model.train()
     print("Entrenando... (el primer step tarda, CUDA calienta)", flush=True)
     while step < max_steps:
@@ -199,10 +200,12 @@ def main():
                 step += 1
                 if step == 1 or step % 10 == 0:
                     dt = time.time() - t0
+                    tok = (step - last_rpt_step) * BS * GA * SEQ
                     print(f"s{step} loss {loss.item():.4f} "
                           f"mose_aux r={aux_r_log:.5f} f={aux_log:.5f} "
-                          f"{BS * GA * SEQ / max(dt, 1e-3):.0f}t/s bloque {sd.block_idx}")
+                          f"{tok / max(dt, 1e-3):.0f}t/s bloque {sd.block_idx}")
                     t0 = time.time()
+                    last_rpt_step = step
         epoch += 1
         opt = advance_block(opt)
 
