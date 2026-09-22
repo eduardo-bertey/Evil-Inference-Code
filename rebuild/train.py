@@ -95,8 +95,10 @@ def main():
     lr_val = float(lr_in) if lr_in else 2e-5
 
     def save_state():
-        with open(state_path, "w") as f:
+        tmp = state_path + ".tmp"
+        with open(tmp, "w") as f:
             json.dump({"block": sd.block_idx, "step": step}, f)
+        os.replace(tmp, state_path)
 
     def setup_block():
         """PRiSM de nuevo en cada bloque + optimizer nuevo.
