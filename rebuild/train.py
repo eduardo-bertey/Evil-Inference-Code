@@ -61,14 +61,15 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}")
 
-    repo = input("Repo HF destino (ej. ScortexIA/k2-es): ").strip()
-    rev = input("Rama [k2-rebuild]: ").strip() or "k2-rebuild"
+    # Un solo modelo: base y finetune viven en el mismo repo@branch.
+    repo, rev = "ScortexIA/laurelia", "k2"
+    print(f"Modelo unico: {repo}@{rev}")
     token = get_token(repo)
     api = HfApi()
 
-    print("Verificando K2-MoSE en ScortexIA/laurelia@k2...")
+    print(f"Verificando K2-MoSE en {repo}@{rev}...")
     model, hf_tok = ensure_k2_mose(
-        repo="ScortexIA/laurelia", branch="k2", token=token,
+        repo=repo, branch=rev, token=token,
         build_dir=os.path.join(_DIR, "k2_mose_build"))
     model.config.use_cache = False
     if hasattr(model, "gradient_checkpointing_enable"):
