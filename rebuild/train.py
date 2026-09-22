@@ -72,8 +72,10 @@ def main():
         repo=repo, branch=rev, token=token,
         build_dir=os.path.join(_DIR, "k2_mose_build"))
     model.config.use_cache = False
-    if hasattr(model, "gradient_checkpointing_enable"):
-        model.gradient_checkpointing_enable()
+    # SIN gradient checkpointing a proposito: el recompute re-ejecuta el
+    # forward en el backward, pero el router MoSE mete ruido random y el
+    # route_bias ya cambio -> anchos distintos -> shapes distintas -> explota.
+    # 0.9B con PRiSM (pocas capas con grad) entra en T4 sin checkpointing.
     # Estado persistente: si se reinicia, sigue donde quedo.
     state_path = os.path.join(_DIR, "rebuild_state.json")
     saved = {"block": 0, "step": 0}
