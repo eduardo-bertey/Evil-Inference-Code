@@ -16,6 +16,8 @@ import time
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
+# Menos fragmentacion VRAM (antes de cualquier alloc CUDA).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 train_data = importlib.import_module("train-data")
 import prism
 
@@ -27,7 +29,7 @@ from k2_mose import ensure_k2_mose
 
 BASE = "IFM/K2-Horizon-0.9B"
 SEQ = 2048
-BS = 2
+BS = 1  # microbatch 1: sin checkpointing no entran 2 en T4
 GA = 8
 
 
@@ -135,8 +137,12 @@ def main():
     print("Optimizer: AdamW (solo entrenables, nuevo por bloque)")
     save_state()
 
-    run_steps = int(input("Steps [500]: ").strip() or 500)
-    max_steps = step + run_steps
+    n_seq0 = max(0, (len(sd.get_tokens()) - SEQ - 1) // SEQ)
+    steps_per_block = max(1, -(-n_seq0 // (BS * GA)))
+    print(f"Bloque {sd.block_idx}: {len(sd.get_tokens())} tokens, "
+          f"~{n_seq0} seqs -> ~{steps_per_block} steps")
+    n_blocks_in = input("Bloques [5]: ").strip()
+    max_steps = step + (int(n_blocks_in) if n_blocks_in else 5) * steps_per_block
     epoch = 0
     aux_log = 0.0
     aux_r_log = 0.0
