@@ -162,10 +162,37 @@ class TrainData:
         return os.path.getsize(path) >= int(self._expected_bytes() * 0.8)
 
     def _load_tokens_from_file(self):
+        import torch as _torch
+        from concurrent.futures import ThreadPoolExecutor
+        cache = self._path + ".ids.pt"
+        if (os.path.exists(cache)
+                and os.path.getmtime(cache) >= os.path.getmtime(self._path)):
+            self._tokens = _torch.load(cache).tolist()
+            print(f"  ids cache: {len(self._tokens)} tokens (sin retokenizar)")
+            return
         with open(self._path, "r", encoding="utf-8") as f:
             text = f.read()
-        self._tokens = self._tokenizer.encode(text)
-        print(f"  Bytes bloque {self.block_idx}: {len(text.encode('utf-8'))} | tokens ids: {len(self._tokens)}")
+        n_bytes = len(text.encode("utf-8"))
+        print(f"  Tokenizando bloque {self.block_idx}: {n_bytes} bytes en paralelo...",
+              flush=True)
+        paras = text.split("\n\n")
+        workers = max(4, (os.cpu_count() or 4))
+        chunks, cur, target = [], [], max(1, len(text) // workers)
+        for p in paras:
+            cur.append(p)
+            if sum(len(c) for c in cur) >= target and len(chunks) < workers - 1:
+                chunks.append("\n\n".join(cur))
+                cur = []
+        if cur:
+            chunks.append("\n\n".join(cur))
+        with ThreadPoolExecutor(max_workers=len(chunks)) as ex:
+            parts = list(ex.map(self._tokenizer.encode, chunks))
+        ids = []
+        for p in parts:
+            ids.extend(p)
+        self._tokens = ids
+        _torch.save(_torch.tensor(ids, dtype=_torch.long), cache)
+        print(f"  Bytes bloque {self.block_idx}: {n_bytes} | tokens ids: {len(self._tokens)}")
 
     def load_tokens(self, tokenizer):
         self._tokenizer = tokenizer
