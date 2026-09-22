@@ -28,8 +28,8 @@ import mose
 from k2_mose import ensure_k2_mose
 
 BASE = "IFM/K2-Horizon-0.9B"
-SEQ = 2048
-BS = 1  # microbatch 1: sin checkpointing no entran 2 en T4
+SEQ = 1024  # activaciones ~4x menos que 2048 (atencion cuadrarica)
+BS = 1
 GA = 8
 
 
@@ -180,6 +180,7 @@ def main():
             loss_r = float(out_r.loss.detach())
             aux_r_log = float(aux_r.detach()) if torch.is_tensor(aux_r) else float(aux_r)
             del out_r, aux_r
+            torch.cuda.empty_cache()  # libera pico del pass 1 antes del pass 2
             mose.set_force_full(model, True)
             out_f = model(input_ids=x, labels=y)
             aux_f = mose.collect_aux_loss(model)
