@@ -204,8 +204,12 @@ def main():
                 state = model.state_dict()
                 ckpt = {"step": step, "epoch": epoch, "block": 0, "model": state}
                 torch.save(ckpt, ckpt_path)
-                if pusher and (time.time() - pusher.last_push) >= pusher.interval:
-                    pusher.maybe_push(ckpt_path, None, None, step)
+
+            if pusher and (time.time() - pusher.last_push) >= pusher.interval:
+                state = model.state_dict()
+                ckpt = {"step": step, "epoch": epoch, "block": 0, "model": state}
+                torch.save(ckpt, ckpt_path)
+                pusher.maybe_push(ckpt_path, None, None, step)
 
         epoch += 1
 
