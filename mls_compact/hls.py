@@ -29,7 +29,7 @@ def lsh_hash(rng: random.Random | None = None, salt: int = 0):
     """Genera un dato de 24 bits y devuelve (a1 su hash de 23 bits, b2 el dato)."""
     r = rng if rng is not None else random
     b2 = r.getrandbits(BITS_IN)
-    shift = r.randrange(N_SLIDES)
+    shift = 0
     window = (b2 >> shift) & MASK_WIN
     a1 = _mix(window ^ salt) & MASK_WIN
     return a1, b2
