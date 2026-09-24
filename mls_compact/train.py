@@ -165,9 +165,11 @@ def main():
         print(f"Loaded checkpoint: step {step} epoch {epoch}")
 
     num_warmup = config.warm_up
-    num_decay = max(1, int(steps * 0.15))
-    num_stable = max(0, steps - num_warmup - num_decay)
+    total_steps = step + steps
+    num_decay = max(1, int(total_steps * 0.15))
+    num_stable = max(0, total_steps - num_warmup - num_decay)
     scheduler = get_wsd_schedule(optimizer, num_warmup, num_stable, num_decay)
+    step_start = step
 
     layer_p = sum(p.numel() for b in model.blocks for p in b.parameters())
     print(f"Params: {config.layers}capas={layer_p:,} + in_proj={model.in_proj.weight.numel():,} + bit_head={model.bit_head.weight.numel():,}")
@@ -181,7 +183,7 @@ def main():
     last_rpt_step = 0
     micro = 0
 
-    while step < steps:
+    while step < total_steps:
         if train_pairs is None:
             x, y = make_batch_fresh(config.batch_size, rng, device)
         else:
@@ -230,7 +232,7 @@ def main():
     hf.upload_checkpoint(ckpt_path, None, None, step)
     print(f"Acc final: {evaluate(model, val_pairs, device):.3f}")
     show_sample(model, val_pairs, device)
-    print(f"Done! {step} steps in {time.time()-t0:.1f}s")
+    print(f"Done! {step - step_start} steps (total {step}) in {time.time()-t0:.1f}s")
 
 
 if __name__ == "__main__":
