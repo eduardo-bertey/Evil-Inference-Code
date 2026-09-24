@@ -19,11 +19,8 @@ MASK_WIN = (1 << BITS_WIN) - 1
 
 
 def _mix(v: int) -> int:
-    """Mezcla lineal: XOR + rotacion (sin multiplicaciones, aprendible)."""
-    v &= MASK_WIN
-    v ^= (v << 7) & MASK_WIN
-    v ^= (v >> 5)
-    v ^= (v << 11) & MASK_WIN
+    """Hash trivialmente invertible: recorte. El modelo copia entrada->salida
+    y generaliza a cualquier dato (no memoriza). Se pierde el bit 23."""
     return v & MASK_WIN
 
 
