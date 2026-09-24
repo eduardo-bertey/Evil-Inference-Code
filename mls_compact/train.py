@@ -127,14 +127,22 @@ def main():
     print(f"  Compute: {dtype}")
 
     steps = int(input("Steps [2000]: ").strip() or 2000)
+    modo = input("Datos (p=pool fijo, f=frescos) [p]: ").strip().lower()
+    pool_size = int(input("Pool pares [4096]: ").strip() or 4096)
     lr_in = input("lr [3e-4]: ").strip()
     if lr_in:
         config.learning_rate = float(lr_in)
 
     val_pairs = make_pool(64, seed=99)
     rng = random.Random()
-    print(f"Datos HLS: infinitos (par nuevo por batch, semilla {time.time_ns()}) | "
-          f"entrada vector {BITS_WIN} -> salida vector {BITS_IN}")
+    if modo == "f":
+        train_pairs = None
+        print(f"Datos HLS: frescos por batch (no se aprende, acc ~0.5) | "
+              f"entrada vector {BITS_WIN} -> salida vector {BITS_IN}")
+    else:
+        train_pairs = make_pool(pool_size, seed=1)
+        print(f"Datos HLS: pool fijo de {len(train_pairs)} pares (se repiten) | "
+              f"entrada vector {BITS_WIN} -> salida vector {BITS_IN}")
 
     model = LLM(config)
     model.in_proj = torch.nn.Linear(BITS_WIN, config.dim, bias=False)
@@ -174,7 +182,10 @@ def main():
     micro = 0
 
     while step < steps:
-        x, y = make_batch_fresh(config.batch_size, rng, device)
+        if train_pairs is None:
+            x, y = make_batch_fresh(config.batch_size, rng, device)
+        else:
+            x, y = make_batch(train_pairs, config.batch_size, rng, device)
         logits = forward_bits(model, x)
         loss = loss_fct(logits.float(), y)
         (loss / config.grad_acc).backward()
