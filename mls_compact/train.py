@@ -39,13 +39,24 @@ def make_batch(pairs, bs, rng, device):
     return x.to(device), y.to(device)
 
 
+def make_batch_fresh(bs, rng, device):
+    """Pares nuevos cada batch: datos infinitos (el hash sale del dato)."""
+    x = torch.empty((bs, BITS_WIN), dtype=torch.float32)
+    y = torch.empty((bs, BITS_IN, 1), dtype=torch.float32)
+    for j in range(bs):
+        a1, b2 = lsh_hash(rng, salt=SALT)
+        x[j] = torch.tensor(bits_of(a1, BITS_WIN), dtype=torch.float32)
+        y[j, :, 0] = torch.tensor(bits_of(b2, BITS_IN), dtype=torch.float32)
+    return x.to(device), y.to(device)
+
+
 def forward_bits(model, x):
     """Vector 23 -> in_proj -> (B,1,dim) -> blocks -> head -> (B,24,1)."""
     h = model.in_proj(x).unsqueeze(1)
     for block in model.blocks:
         h = block(h)
     h = model.norm_f(h)
-    return model.bit_head(h).unsqueeze(-1)
+    return model.bit_head(h).squeeze(1).unsqueeze(-1)
 
 
 @torch.no_grad()
@@ -116,15 +127,14 @@ def main():
     print(f"  Compute: {dtype}")
 
     steps = int(input("Steps [2000]: ").strip() or 2000)
-    pool_size = int(input("Pool pares [4096]: ").strip() or 4096)
     lr_in = input("lr [3e-4]: ").strip()
     if lr_in:
         config.learning_rate = float(lr_in)
 
-    train_pairs = make_pool(pool_size, seed=1)
-    val_pairs = make_pool(min(64, pool_size), seed=99)
-    rng = random.Random(7)
-    print(f"Datos HLS: {len(train_pairs)} pares | entrada vector {BITS_WIN} -> salida vector {BITS_IN}")
+    val_pairs = make_pool(64, seed=99)
+    rng = random.Random()
+    print(f"Datos HLS: infinitos (par nuevo por batch, semilla {time.time_ns()}) | "
+          f"entrada vector {BITS_WIN} -> salida vector {BITS_IN}")
 
     model = LLM(config)
     model.in_proj = torch.nn.Linear(BITS_WIN, config.dim, bias=False)
@@ -164,7 +174,7 @@ def main():
     micro = 0
 
     while step < steps:
-        x, y = make_batch(train_pairs, config.batch_size, rng, device)
+        x, y = make_batch_fresh(config.batch_size, rng, device)
         logits = forward_bits(model, x)
         loss = loss_fct(logits.float(), y)
         (loss / config.grad_acc).backward()
