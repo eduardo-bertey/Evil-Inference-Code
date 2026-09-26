@@ -1,12 +1,18 @@
 import sys, os, time, math, random, inspect, torch
 import torch.nn.functional as F
+# AdamW 8-bit: APAGADO por defecto. Para prenderlo: ADAMW8=1 en el env.
+# (En un 188M no se nota; sirve en modelos grandes donde los estados mandan.)
+QUIERE_BNB = os.environ.get("ADAMW8", "0") == "1"
+
+
 def _con_bnb():
+    if not QUIERE_BNB:
+        return None, False, "apagado (ADAMW8!=1)"
     try:
         import bitsandbytes as _bnb
         return _bnb, True, ""
-    except ImportError as e0:
+    except ImportError:
         pass
-    # No estaba: se instala solo (una vez por corrida). Si falla, torch AdamW.
     try:
         import subprocess as _sp
         print("instalando bitsandbytes (una vez)...", flush=True)
