@@ -136,15 +136,16 @@ def main():
             amp_dtype = torch.float16
         else:
             dtype = torch.float32
-    scaler = torch.amp.GradScaler("cuda", enabled=amp) if device.type == "cuda" else torch.amp.GradScaler("cpu", enabled=amp)
+    usar_scaler = amp or dtype == torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=usar_scaler) if device.type == "cuda" else torch.amp.GradScaler("cpu", enabled=usar_scaler)
     from contextlib import nullcontext as _nullctx
     ac = (torch.amp.autocast(device.type, dtype=amp_dtype)
           if amp else _nullctx())
     def bwd(t):
-        # Con AMP se escala; sin AMP es el backward normal.
-        (scaler.scale(t) if amp else t).backward()
+        # Con scaler (AMP o f16 puro) se escala; si no, backward normal.
+        (scaler.scale(t) if usar_scaler else t).backward()
     master = "f32 (master)" if amp else str(dtype)
-    print(f"  Compute: {dtype}  |  Weights: {master}  |  AMP: {amp}  |  Scaler: {scaler.get_scale() if amp else 'off'}")
+    print(f"  Compute: {dtype}  |  Weights: {master}  |  AMP: {amp}  |  Scaler: {scaler.get_scale() if usar_scaler else 'off'}")
 
     # ── Tokenizer ──────────────────────────────────────────────────────────
     tokenizer = None
@@ -374,7 +375,7 @@ def main():
             micro += 1
 
             if micro >= grad_accum:
-                if amp:
+                if usar_scaler:
                     scaler.unscale_(opt)
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
 
@@ -425,7 +426,7 @@ def main():
                     except Exception as e:
                         print(f"  Layer grad reporting failed: {e}")
 
-                if amp:
+                if usar_scaler:
                     scaler.step(opt)
                     scaler.update()
                 else:
@@ -490,10 +491,10 @@ def main():
                     pm.upload(step)
 
         if micro > 0:
-            if amp:
+            if usar_scaler:
                 scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
-            if amp:
+            if usar_scaler:
                 scaler.step(opt)
                 scaler.update()
             else:
