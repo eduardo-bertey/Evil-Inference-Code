@@ -163,8 +163,11 @@ class MoELayer(nn.Module):
         N = B * T
         xf = x.reshape(N, C)
 
-        # 1) Router scores por ruta (experto, ancho)
-        logits = self.router(xf).view(N, self.n_experts, self.n_widths)  # (N, E, W)
+        # 1) Router scores por ruta (experto, ancho).
+        # El router va en f32 SIEMPRE: en f16 el softmax/top-k se subfluyean y
+        # el z-loss (logsumexp al cuadrado) se va a inf -> NaN. Los expertos
+        # siguen en el dtype del modelo; solo el ruteo es f32.
+        logits = self.router(xf).float().view(N, self.n_experts, self.n_widths)  # (N, E, W)
 
         if self.training and self.noise_std > 0:
             logits = logits + torch.randn_like(logits) * self.noise_std
