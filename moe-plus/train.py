@@ -3,9 +3,11 @@ import torch.nn.functional as F
 try:
     import bitsandbytes as bnb
     TIENE_BNB = True
-except ImportError:
+    BNB_ERROR = ""
+except ImportError as e:
     bnb = None
     TIENE_BNB = False
+    BNB_ERROR = str(e)
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
@@ -160,6 +162,12 @@ def main():
         else:
             dtype = torch.float32
     usar_scaler = amp
+    # f16 puro con escala ESTATICA (manual, sin GradScaler): se multiplica el
+    # loss por f16_escala antes del backward y se dividen los grads antes del
+    # step. Asi los grads chicos entran en rango fp16. Si hay overflow, bajar
+    # la escala (512, 128); si hay underflow (grads en 0), subirla (4096, 8192).
+    f16_escala = 1024.0
+    f16_estatico = dtype == torch.float16 and not amp
     # Diagnostico NaN: chequea grads antes del step, params despues, y el
     # forward del router por dentro. Frena en el acto con el nombre. Lento
     # (sincroniza CUDA): apagar cuando ande.
@@ -252,7 +260,10 @@ def main():
         opt = bnb.optim.AdamW8bit(optim_groups, lr=lr, betas=(0.9, 0.95))
     else:
         opt = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), fused=use_fused)
-    print(f"AdamW {'8bit' if use_8bit else 'fused='+str(use_fused)} | decay={len(other_decay_params)} param tensors, emb_lr=lr/4, nodecay={len(nodecay_params)}")
+    if use_8bit:
+        print(f"AdamW 8bit (bnb {bnb.__version__}) | decay={len(other_decay_params)} param tensors, emb_lr=lr/4, nodecay={len(nodecay_params)}")
+    else:
+        print(f"AdamW fused={use_fused} (sin bnb: {BNB_ERROR}) | decay={len(other_decay_params)} param tensors, emb_lr=lr/4, nodecay={len(nodecay_params)}")
 
     # ── Checkpoint ─────────────────────────────────────────────────────────
     step = 0
@@ -427,6 +438,10 @@ def main():
             if micro >= grad_accum:
                 if usar_scaler:
                     scaler.unscale_(opt)
+                if f16_estatico:
+                    for _p in model.parameters():
+                        if _p.grad is not None:
+                            _p.grad.div_(f16_escala)
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
 
                 if step % 10 == 0:
@@ -477,6 +492,14 @@ def main():
                         print(f"  Layer grad reporting failed: {e}")
 
                 if debug_nan:
+                    print("loss:", float(loss.detach()) if isinstance(loss, torch.Tensor) else loss)
+                    print("loss finite:", bool(torch.isfinite(loss).all()) if isinstance(loss, torch.Tensor) else True)
+                    g = model.embedding.weight.grad
+                    if g is None:
+                        print("embedding grad: None (no corrio backward)")
+                    else:
+                        print("embedding grad finite:", bool(torch.isfinite(g).all()))
+                        print("embedding grad max:", float(torch.nan_to_num(g).abs().max()))
                     chequear_finito("grad")
                 if usar_scaler:
                     scaler.step(opt)
@@ -549,6 +572,10 @@ def main():
         if micro > 0:
             if usar_scaler:
                 scaler.unscale_(opt)
+            if f16_estatico:
+                for _p in model.parameters():
+                    if _p.grad is not None:
+                        _p.grad.div_(f16_escala)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
             if debug_nan:
                 chequear_finito("grad")
