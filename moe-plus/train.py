@@ -1,13 +1,25 @@
 import sys, os, time, math, random, inspect, torch
 import torch.nn.functional as F
-try:
-    import bitsandbytes as bnb
-    TIENE_BNB = True
-    BNB_ERROR = ""
-except ImportError as e:
-    bnb = None
-    TIENE_BNB = False
-    BNB_ERROR = str(e)
+def _con_bnb():
+    try:
+        import bitsandbytes as _bnb
+        return _bnb, True, ""
+    except ImportError as e0:
+        pass
+    # No estaba: se instala solo (una vez por corrida). Si falla, torch AdamW.
+    try:
+        import subprocess as _sp
+        print("instalando bitsandbytes (una vez)...", flush=True)
+        _sp.run([sys.executable, "-m", "pip", "install", "--quiet",
+                 "bitsandbytes"], check=True,
+                capture_output=True, timeout=600)
+        import bitsandbytes as _bnb
+        return _bnb, True, ""
+    except Exception as e1:
+        return None, False, str(e1)
+
+
+bnb, TIENE_BNB, BNB_ERROR = _con_bnb()
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
