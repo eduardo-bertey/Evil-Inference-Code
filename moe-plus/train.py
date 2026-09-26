@@ -492,14 +492,6 @@ def main():
                         print(f"  Layer grad reporting failed: {e}")
 
                 if debug_nan:
-                    print("loss:", float(loss.detach()) if isinstance(loss, torch.Tensor) else loss)
-                    print("loss finite:", bool(torch.isfinite(loss).all()) if isinstance(loss, torch.Tensor) else True)
-                    g = model.embedding.weight.grad
-                    if g is None:
-                        print("embedding grad: None (no corrio backward)")
-                    else:
-                        print("embedding grad finite:", bool(torch.isfinite(g).all()))
-                        print("embedding grad max:", float(torch.nan_to_num(g).abs().max()))
                     chequear_finito("grad")
                 if usar_scaler:
                     scaler.step(opt)
