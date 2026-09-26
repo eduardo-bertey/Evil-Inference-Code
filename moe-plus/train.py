@@ -153,7 +153,7 @@ def main():
             amp_dtype = torch.float16
         else:
             dtype = torch.float32
-    usar_scaler = amp or dtype == torch.float16
+    usar_scaler = amp
     # Diagnostico NaN: chequea grads antes del step, params despues, y el
     # forward del router por dentro. Frena en el acto con el nombre. Lento
     # (sincroniza CUDA): apagar cuando ande.
