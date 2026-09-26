@@ -204,7 +204,8 @@ class MoELayer(nn.Module):
             z_in = logits[..., wi]
             # Re-mapeo a indices de ruta para reutilizar el mismo despacho
             topk_i = topk_e * self.n_widths + wi
-            probs = torch.zeros(N, self.n_routes, device=xf.device)
+            probs = torch.zeros(N, self.n_routes, device=xf.device,
+                                dtype=probs_e.dtype)
             probs.scatter_(-1, topk_e * self.n_widths + wi,
                             probs_e.gather(-1, topk_e))
 
