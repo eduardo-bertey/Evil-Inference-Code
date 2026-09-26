@@ -131,11 +131,18 @@ def main():
         elif prec == "f":
             dtype = torch.float16
         elif prec == "a":
-            dtype = torch.float16
+            dtype = torch.float32   # master en fp32, el compute va en fp16
             amp = True
+            amp_dtype = torch.float16
         else:
             dtype = torch.float32
     scaler = torch.amp.GradScaler("cuda", enabled=amp) if device.type == "cuda" else torch.amp.GradScaler("cpu", enabled=amp)
+    from contextlib import nullcontext as _nullctx
+    ac = (torch.amp.autocast(device.type, dtype=amp_dtype)
+          if amp else _nullctx())
+    def bwd(t):
+        # Con AMP se escala; sin AMP es el backward normal.
+        (scaler.scale(t) if amp else t).backward()
     master = "f32 (master)" if amp else str(dtype)
     print(f"  Compute: {dtype}  |  Weights: {master}  |  AMP: {amp}  |  Scaler: {scaler.get_scale() if amp else 'off'}")
 
@@ -329,21 +336,23 @@ def main():
                 # mitad de pico de memoria que retener los dos grafos.
                 w_random = random.uniform(mose_w_min, mose_w_max)
                 w_last = w_random
-                if use_partial_rope:
-                    logits_f, aux_f = model.forward_train_partial_rope(x, rotary_pct=rotary_pct, width=mose_w_max)
-                else:
-                    logits_f, aux_f = model(x, width=mose_w_max)
-                loss_f = F.cross_entropy(logits_f.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
-                (0.5 * (loss_f + aux_f) / grad_accum).backward()
+                with ac:
+                    if use_partial_rope:
+                        logits_f, aux_f = model.forward_train_partial_rope(x, rotary_pct=rotary_pct, width=mose_w_max)
+                    else:
+                        logits_f, aux_f = model(x, width=mose_w_max)
+                    loss_f = F.cross_entropy(logits_f.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
+                bwd(0.5 * (loss_f + aux_f) / grad_accum)
                 loss_f_log = float(loss_f.detach())
                 aux_f_log = float(aux_f.detach()) if isinstance(aux_f, torch.Tensor) else float(aux_f)
                 del logits_f, loss_f, aux_f
-                if use_partial_rope:
-                    logits_r, aux_r = model.forward_train_partial_rope(x, rotary_pct=rotary_pct, width=w_random)
-                else:
-                    logits_r, aux_r = model(x, width=w_random)
-                loss_r = F.cross_entropy(logits_r.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
-                (0.5 * (loss_r + aux_r) / grad_accum).backward()
+                with ac:
+                    if use_partial_rope:
+                        logits_r, aux_r = model.forward_train_partial_rope(x, rotary_pct=rotary_pct, width=w_random)
+                    else:
+                        logits_r, aux_r = model(x, width=w_random)
+                    loss_r = F.cross_entropy(logits_r.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
+                bwd(0.5 * (loss_r + aux_r) / grad_accum)
                 loss_r_log = float(loss_r.detach())
                 aux_r_log = float(aux_r.detach()) if isinstance(aux_r, torch.Tensor) else float(aux_r)
                 del logits_r, loss_r, aux_r
@@ -351,18 +360,22 @@ def main():
                 loss = torch.tensor(0.5 * (loss_f_log + loss_r_log))
                 aux_loss = torch.tensor(0.5 * (aux_f_log + aux_r_log))
             elif use_partial_rope:
-                logits, aux_loss = model.forward_train_partial_rope(x, rotary_pct=rotary_pct)
-                loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
-                loss = loss + aux_loss  # add MoE z-loss
-                (loss / grad_accum).backward()
+                with ac:
+                    logits, aux_loss = model.forward_train_partial_rope(x, rotary_pct=rotary_pct)
+                    loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
+                    loss = loss + aux_loss  # add MoE z-loss
+                bwd(loss / grad_accum)
             else:
-                logits, aux_loss = model(x)
-                loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
-                loss = loss + aux_loss  # add MoE z-loss
-                (loss / grad_accum).backward()
+                with ac:
+                    logits, aux_loss = model(x)
+                    loss = F.cross_entropy(logits.reshape(-1, tokenizer.vocab_size), y.reshape(-1))
+                    loss = loss + aux_loss  # add MoE z-loss
+                bwd(loss / grad_accum)
             micro += 1
 
             if micro >= grad_accum:
+                if amp:
+                    scaler.unscale_(opt)
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
 
                 if step % 10 == 0:
@@ -412,7 +425,11 @@ def main():
                     except Exception as e:
                         print(f"  Layer grad reporting failed: {e}")
 
-                opt.step()
+                if amp:
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    opt.step()
                 opt.zero_grad()
                 step += 1
                 micro = 0
@@ -473,8 +490,14 @@ def main():
                     pm.upload(step)
 
         if micro > 0:
+            if amp:
+                scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
-            opt.step()
+            if amp:
+                scaler.step(opt)
+                scaler.update()
+            else:
+                opt.step()
             opt.zero_grad()
             step += 1
             micro = 0
