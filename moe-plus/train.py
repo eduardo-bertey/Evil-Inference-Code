@@ -1,5 +1,11 @@
 import sys, os, time, math, random, inspect, torch
 import torch.nn.functional as F
+try:
+    import bitsandbytes as bnb
+    TIENE_BNB = True
+except ImportError:
+    bnb = None
+    TIENE_BNB = False
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 sys.path.insert(0, os.path.join(_DIR, ".."))
@@ -239,8 +245,14 @@ def main():
     ]
     fused_available = "fused" in inspect.signature(torch.optim.AdamW).parameters
     use_fused = fused_available and device.type == "cuda"
-    opt = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), fused=use_fused)
-    print(f"AdamW fused={use_fused} | decay={len(other_decay_params)} param tensors, emb_lr=lr/4, nodecay={len(nodecay_params)}")
+    # AdamW 8-bit (bitsandbytes): estados en 8 bits, update igual. En CUDA con
+    # bnb va el 8-bit; si no hay bnb queda el torch AdamW de antes.
+    use_8bit = TIENE_BNB and device.type == "cuda"
+    if use_8bit:
+        opt = bnb.optim.AdamW8bit(optim_groups, lr=lr, betas=(0.9, 0.95))
+    else:
+        opt = torch.optim.AdamW(optim_groups, lr=lr, betas=(0.9, 0.95), fused=use_fused)
+    print(f"AdamW {'8bit' if use_8bit else 'fused='+str(use_fused)} | decay={len(other_decay_params)} param tensors, emb_lr=lr/4, nodecay={len(nodecay_params)}")
 
     # ── Checkpoint ─────────────────────────────────────────────────────────
     step = 0
