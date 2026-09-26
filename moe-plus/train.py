@@ -367,7 +367,7 @@ def main():
                 lr_curr = get_lr(step, total_steps, warmup_steps, lr)
                 for pg in opt.param_groups:
                     pg["lr"] = lr_curr * pg.get("lr_scale", 1.0)
-                opt.zero_grad()
+                opt.zero_grad(set_to_none=True)
 
             if use_moe:
                 # MoSE Eq.(6): dos forwards por minibatch (w_max + w aleatorio).
@@ -473,7 +473,7 @@ def main():
                     opt.step()
                 if debug_nan:
                     chequear_finito("param")
-                opt.zero_grad()
+                opt.zero_grad(set_to_none=True)
                 step += 1
                 micro = 0
 
@@ -547,7 +547,7 @@ def main():
                 opt.step()
             if debug_nan:
                 chequear_finito("param")
-            opt.zero_grad()
+            opt.zero_grad(set_to_none=True)
             step += 1
             micro = 0
 
