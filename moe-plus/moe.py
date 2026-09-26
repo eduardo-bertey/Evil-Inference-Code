@@ -32,6 +32,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Diagnostico NaN (lo prende train.py con moe.DEBUG_NAN = True).
+DEBUG_NAN = False
+
 
 def _swiglu(x, gate):
     return F.silu(gate) * x
@@ -184,7 +187,13 @@ class MoELayer(nn.Module):
                 lb_loss = self.load_balance_gamma * ((p_mean - target) ** 2).sum()
             else:
                 lb_loss = torch.tensor(0.0, device=probs.device)
+            if DEBUG_NAN:
+                assert bool(torch.isfinite(xf).all()), "X NaN"
+                assert bool(torch.isfinite(logits).all()), "ROUTER NaN"
+                assert bool(torch.isfinite(probs).all()), "PROBS NaN"
             topk_w, topk_i = probs.topk(self.top_k, dim=-1)  # (N, top_k)
+            if DEBUG_NAN:
+                assert bool(torch.isfinite(topk_w).all()), "TOPK NaN"
             topk_w = topk_w / (topk_w.sum(dim=-1, keepdim=True) + 1e-9)
             # z-loss sobre logits SIN bias trick (el bias es balanceo loss-free;
             # con bias, el forward full arrastra bias añejos y el z diverge).
@@ -201,7 +210,13 @@ class MoELayer(nn.Module):
                 lb_loss = self.load_balance_gamma * ((p_mean - target) ** 2).sum()
             else:
                 lb_loss = torch.tensor(0.0, device=probs_e.device)
+            if DEBUG_NAN:
+                assert bool(torch.isfinite(xf).all()), "X NaN"
+                assert bool(torch.isfinite(logits).all()), "ROUTER NaN"
+                assert bool(torch.isfinite(probs_e).all()), "PROBS NaN"
             topk_w, topk_e = probs_e.topk(self.top_k, dim=-1)
+            if DEBUG_NAN:
+                assert bool(torch.isfinite(topk_w).all()), "TOPK NaN"
             topk_w = topk_w / (topk_w.sum(dim=-1, keepdim=True) + 1e-9)
             # z-loss sobre logits SIN bias (ver arriba).
             z_in = logits[..., wi]
