@@ -19,6 +19,9 @@ from huggingface import HFManager, PeriodicPusher
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers, decoders
 from plot import PlotManager
 
+# Debug NaN global (lo setea main): True = chequea y frena, False = limpio.
+DEBUG = False
+
 
 class BPEWrapper:
     def __init__(self, tok):
@@ -32,30 +35,23 @@ class BPEWrapper:
 
 @torch.no_grad()
 def generate_sample(model, tokenizer, device, prompt="hola", max_new=30, width=None):
-    # Si el modelo esta en una zona con activaciones extremas, el forward en
-    # fp16 puede dar inf/NaN: en ese caso se avisa y no se muestrea (muestrear
-    # sobre NaN revienta el multinomial y mata la corrida, aunque los pesos
-    # sigan sanos y el scaler venga saltando esos steps).
     model.eval()
-    try:
+    # Con debug: si los logits no son finitos se avisa y no se muestrea
+    # (muestrear sobre NaN revienta el multinomial y mata la corrida).
+    if DEBUG:
         x = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
         with torch.no_grad():
             logits, _ = model.forward_with_cache(
                 x, 0, [None] * model.num_layers, width)
         if not bool(torch.isfinite(logits).all()):
             model.train()
-            return "<logits no finitos: el modelo esta en zona extrema>"
-        out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40, top_p=0.9,
-                             repetition_penalty=1.2, use_partial_rope=use_partial_rope, rotary_pct=rotary_pct,
-                             width=width)
-        model.train()
-        return tokenizer.decode(out[0].tolist())
-    except Exception as e:
-        try:
-            model.train()
-        except Exception:
-            pass
-        return f"<generate fallo: {e}>" 
+            return "<logits no finitos>"
+    x = torch.tensor([tokenizer.encode(prompt)], dtype=torch.long, device=device)
+    out = model.generate(x, max_new_tokens=max_new, temperature=0.7, top_k=40, top_p=0.9,
+                         repetition_penalty=1.2, use_partial_rope=use_partial_rope, rotary_pct=rotary_pct,
+                         width=width)
+    model.train()
+    return tokenizer.decode(out[0].tolist())
 
 
 def train_tokenizer_from_wiki(vocab_size, output_path):
@@ -168,12 +164,14 @@ def main():
     # la escala (512, 128); si hay underflow (grads en 0), subirla (4096, 8192).
     f16_escala = 1024.0
     f16_estatico = dtype == torch.float16 and not amp
-    # Diagnostico NaN: chequea grads antes del step, params despues, y el
-    # forward del router por dentro. Frena en el acto con el nombre. Lento
-    # (sincroniza CUDA): apagar cuando ande.
-    debug_nan = True
+    # Debug NaN con UN solo flag: True = chequea todo y frena con nombre,
+    # False = corre limpio sin sincronizar CUDA. Cambiar aca y listo.
+    debug = False
+    global DEBUG
+    DEBUG = debug
     import moe as _moe_mod
-    _moe_mod.DEBUG_NAN = debug_nan
+    _moe_mod.DEBUG = debug
+
     scaler = torch.amp.GradScaler("cuda", enabled=usar_scaler) if device.type == "cuda" else torch.amp.GradScaler("cpu", enabled=usar_scaler)
     from contextlib import nullcontext as _nullctx
     ac = (torch.amp.autocast(device.type, dtype=amp_dtype)
@@ -184,18 +182,21 @@ def main():
         for name, p in model.named_parameters():
             g = p.grad if donde == "grad" else p.data
             if g is not None and not bool(torch.isfinite(g).all()):
-                print(f"\U0001F525 {'GRAD' if donde == 'grad' else 'PARAM'} NO FINITO {donde.upper()}: {name}")
+                print(f"🔥 {'GRAD' if donde == 'grad' else 'PARAM'} NO FINITO {donde.upper()}: {name}")
                 raise RuntimeError(name)
 
     def bwd(t):
-        # Con scaler (AMP o f16 puro) se escala; si no, backward normal.
-        # Si el forward dio inf/NaN no se hace backward de eso.
         nonlocal malas
-        if isinstance(t, torch.Tensor) and not bool(torch.isfinite(t).all()):
-            malas += 1
-            return False
-        (scaler.scale(t) if usar_scaler else t).backward()
-        return True
+        if debug:
+            if isinstance(t, torch.Tensor) and not bool(torch.isfinite(t).all()):
+                malas += 1
+                return
+        if f16_estatico:
+            (t * f16_escala).backward()
+        elif usar_scaler:
+            scaler.scale(t).backward()
+        else:
+            t.backward()
     master = "f32 (master)" if amp else str(dtype)
     print(f"  Compute: {dtype}  |  Weights: {master}  |  AMP: {amp}  |  Scaler: {scaler.get_scale() if usar_scaler else 'off'}")
 
@@ -491,14 +492,14 @@ def main():
                     except Exception as e:
                         print(f"  Layer grad reporting failed: {e}")
 
-                if debug_nan:
+                if debug:
                     chequear_finito("grad")
                 if usar_scaler:
                     scaler.step(opt)
                     scaler.update()
                 else:
                     opt.step()
-                if debug_nan:
+                if debug:
                     chequear_finito("param")
                 opt.zero_grad(set_to_none=True)
                 step += 1
@@ -531,9 +532,7 @@ def main():
                             except Exception:
                                 pass
                     bal = " | ".join(balance_strs[:3])  # first 3 MoE layers only
-                    malas_txt = f" malas={malas}" if malas else ""
-                    malas = 0
-                    print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s z={total_z_loss:.6f} lb={total_lb_loss:.6f} w={w_last:.2f}{malas_txt}")
+                    print(f"e{epoch} s{step} loss {loss.item():.4f} lr {lr_curr:.6f} {tps:.0f}t/s z={total_z_loss:.6f} lb={total_lb_loss:.6f} w={w_last:.2f}")
                     if use_moe:
                         print(f"  MoSE fwd: full_loss={loss_f_log:.4f} random_loss={loss_r_log:.4f} (w={w_last:.2f}) full_aux={aux_f_log:.6g} random_aux={aux_r_log:.6g}")
                     if bal:
@@ -569,14 +568,14 @@ def main():
                     if _p.grad is not None:
                         _p.grad.div_(f16_escala)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 3.0)
-            if debug_nan:
+            if debug:
                 chequear_finito("grad")
             if usar_scaler:
                 scaler.step(opt)
                 scaler.update()
             else:
                 opt.step()
-            if debug_nan:
+            if debug:
                 chequear_finito("param")
             opt.zero_grad(set_to_none=True)
             step += 1
