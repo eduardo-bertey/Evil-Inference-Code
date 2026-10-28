@@ -158,3 +158,8 @@ rust/input.txt
 *.zip
 /rust/moe-mla - copia
 needle2/
+
+# RAG index (generado localmente) y repo vendorizado
+.rag_index/
+.tmp_dbg/
+vendor/RAW-RAG/

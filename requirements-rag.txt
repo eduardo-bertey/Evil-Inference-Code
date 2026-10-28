@@ -1,0 +1,9 @@
+# Dependencias del motor RAG (RAW-RAG + backend local)
+numpy
+openai
+tiktoken
+rich
+tqdm
+
+# Opcional: embeddings densos y cross-encoder
+# sentence-transformers
