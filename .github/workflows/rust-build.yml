@@ -1,4 +1,4 @@
-name: Rust build (laurelia + moe)
+﻿name: Rust build (laurelia + moe)
 
 on:
   push:
@@ -35,7 +35,7 @@ jobs:
       - name: cargo check (lib)
         run: cargo check --lib
       - name: cargo build --release
-        run: cargo build --release --lib --bin laurelia_chat
+        run: cargo build --release --lib --bin laurelia_chat --bin moe_chat
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
@@ -56,11 +56,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: cargo build --release
-        run: cargo build --release --lib --bin laurelia_chat
+        run: cargo build --release --lib --bin laurelia_chat --bin moe_chat
       - name: Upload exe
         uses: actions/upload-artifact@v4
         with:
           name: rust-windows-exe
-          path: rust/target/release/*.exe
+          path: |
+            rust/target/release/laurelia_chat.exe
+            rust/target/release/moe_chat.exe
           if-no-files-found: warn
           retention-days: 7
