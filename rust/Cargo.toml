@@ -1,4 +1,4 @@
-[package]
+﻿[package]
 name = "xlstm"
 version = "0.1.0"
 edition = "2021"
@@ -151,6 +151,7 @@ path = "xorIA/bin/mingru_equivalence.rs"
 [[bin]]
 name = "laurelia_chat"
 path = "xorIA/laurelia_chat.rs"
+
 
 [[bin]]
 name = "mingruchat_cuda"
