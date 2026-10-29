@@ -65,6 +65,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: rust-binaries
-          path: rust/target/release/*
+          path: rust/target/release/laurelia_chat
           if-no-files-found: warn
           retention-days: 7
