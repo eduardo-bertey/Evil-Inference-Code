@@ -11,9 +11,25 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    name: cargo build --release
-    runs-on: ubuntu-latest
+  build-windows:
+    name: cargo build (windows)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: cargo build --release
+        run: cargo build --release --lib --bin laurelia_chat
+      - name: Upload exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-windows-exe
+          path: rust/target/release/*.exe
+          if-no-files-found: warn
     defaults:
       run:
         working-directory: rust
