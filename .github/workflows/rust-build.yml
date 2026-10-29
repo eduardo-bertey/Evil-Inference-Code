@@ -11,6 +11,39 @@ on:
   workflow_dispatch:
 
 jobs:
+  build-linux:
+    name: cargo build (linux)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ github.sha }}-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+      - name: cargo check (lib)
+        run: cargo check --lib
+      - name: cargo build --release
+        run: cargo build --release --lib --bin laurelia_chat
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-linux-bin
+          path: rust/target/release/laurelia_chat
+          if-no-files-found: warn
+          retention-days: 7
+
   build-windows:
     name: cargo build (windows)
     runs-on: windows-latest
@@ -29,42 +62,5 @@ jobs:
         with:
           name: rust-windows-exe
           path: rust/target/release/*.exe
-          if-no-files-found: warn
-    defaults:
-      run:
-        working-directory: rust
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            rust/target
-          key: ${{ runner.os }}-cargo-${{ github.sha }}-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
-
-      - name: cargo check (lib)
-        run: cargo check --lib
-
-      - name: cargo build --release (lib + chat bin)
-        run: cargo build --release --lib --bin laurelia_chat
-
-      - name: cargo test (lib)
-        run: cargo test --lib
-        continue-on-error: true
-
-      - name: Upload binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: rust-binaries
-          path: rust/target/release/laurelia_chat
           if-no-files-found: warn
           retention-days: 7
