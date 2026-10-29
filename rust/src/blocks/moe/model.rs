@@ -65,4 +65,147 @@ impl LLM {
         let w = self.embedding.embeddings();
         x.matmul(&w.t()?)
     }
+
+    pub fn device(&self) -> &candle_core::Device {
+        self.embedding.embeddings().device()
+    }
+
+    pub fn generate(
+        &self,
+        input_ids: &Tensor,
+        max_new_tokens: usize,
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        repetition_penalty: f32,
+    ) -> Result<Tensor> {
+        let prompt_len = input_ids.dim(1)?;
+        let mut caches: Vec<Option<crate::blocks::moe::cache::KVCache>> =
+            vec![None; self.layers.len()];
+        let mut tokens: Vec<u32> = input_ids.i((0, ..))?.to_vec1()?;
+        let mut logits = Tensor::zeros(
+            (1, 1, self.config.vocab_size),
+            candle_core::DType::F32,
+            self.device(),
+        )?;
+        for i in 0..prompt_len {
+            let t = Tensor::from_vec(vec![tokens[i]], (1, 1), self.device())?;
+            logits = self.forward_with_cache(&t, i, &mut caches)?;
+        }
+
+        let mut gen: Vec<u32> = Vec::new();
+        for gen_i in 0..max_new_tokens {
+            let next = self.sample(&logits, &tokens, temperature, top_k, top_p, repetition_penalty)?;
+            tokens.push(next);
+            gen.push(next);
+
+            let t = Tensor::from_vec(vec![next], (1, 1), self.device())?;
+            logits = self.forward_with_cache(&t, prompt_len + gen_i, &mut caches)?;
+        }
+
+        let all = [tokens[..prompt_len].to_vec(), gen].concat();
+        let n = all.len();
+        Ok(Tensor::from_vec(all, (1, n), self.device())?)
+    }
+
+    fn sample(
+        &self,
+        logits: &Tensor,
+        tokens: &[u32],
+        temperature: f32,
+        top_k: usize,
+        top_p: f32,
+        repetition_penalty: f32,
+    ) -> Result<u32> {
+        let mut logits: Vec<f32> = logits
+            .squeeze(0)?
+            .squeeze(0)?
+            .to_dtype(candle_core::DType::F32)?
+            .to_vec1()?;
+        let vocab = logits.len();
+
+        let t = temperature.max(1e-6);
+        if t != 1.0 {
+            for v in logits.iter_mut() {
+                *v /= t;
+            }
+        }
+
+        if repetition_penalty != 1.0 {
+            let mut seen = vec![false; vocab];
+            for &tok in tokens {
+                let i = tok as usize;
+                if i >= vocab || seen[i] {
+                    continue;
+                }
+                seen[i] = true;
+                if logits[i] > 0.0 {
+                    logits[i] /= repetition_penalty;
+                } else {
+                    logits[i] *= repetition_penalty;
+                }
+            }
+        }
+
+        let mut order: Vec<usize> = (0..vocab).collect();
+        if top_k > 0 && top_k < vocab {
+            order.sort_by(|&a, &b| logits[b].partial_cmp(&logits[a]).unwrap_or(std::cmp::Ordering::Equal));
+            order.truncate(top_k);
+            let mut keep = vec![false; vocab];
+            for &i in &order {
+                keep[i] = true;
+            }
+            for i in 0..vocab {
+                if !keep[i] {
+                    logits[i] = f32::NEG_INFINITY;
+                }
+            }
+        }
+
+        let max = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut probs: Vec<f32> = logits
+            .iter()
+            .map(|&v| {
+                if v == f32::NEG_INFINITY {
+                    0.0
+                } else {
+                    (v - max).exp()
+                }
+            })
+            .collect();
+        let sum: f32 = probs.iter().sum();
+        if sum > 0.0 {
+            for p in probs.iter_mut() {
+                *p /= sum;
+            }
+        }
+
+        if top_p < 1.0 {
+            order.sort_by(|&a, &b| probs[b].partial_cmp(&probs[a]).unwrap_or(std::cmp::Ordering::Equal));
+            let mut cum = 0.0;
+            let mut keep = vec![false; vocab];
+            for &i in &order {
+                cum += probs[i];
+                keep[i] = true;
+                if cum >= top_p {
+                    break;
+                }
+            }
+            for i in 0..vocab {
+                if !keep[i] {
+                    probs[i] = 0.0;
+                }
+            }
+        }
+
+        let u = rand::random::<f32>();
+        let mut cum = 0.0;
+        for i in 0..vocab {
+            cum += probs[i];
+            if u < cum {
+                return Ok(i as u32);
+            }
+        }
+        Ok((vocab - 1) as u32)
+    }
 }

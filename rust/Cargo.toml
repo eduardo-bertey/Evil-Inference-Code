@@ -152,6 +152,10 @@ path = "xorIA/bin/mingru_equivalence.rs"
 name = "laurelia_chat"
 path = "xorIA/laurelia_chat.rs"
 
+[[bin]]
+name = "moe_chat"
+path = "xorIA/moe_chat.rs"
+
 
 [[bin]]
 name = "mingruchat_cuda"
@@ -304,3 +308,4 @@ path = "xorIA/bin/test_training_loss.rs"
 [[bin]]
 name = "test_full_pipeline"
 path = "xorIA/bin/test_full_pipeline.rs"
+
