@@ -82,7 +82,7 @@ impl LLM {
         let prompt_len = input_ids.dim(1)?;
         let mut caches: Vec<Option<crate::blocks::moe::cache::KVCache>> =
             vec![None; self.layers.len()];
-        let mut tokens: Vec<u32> = input_ids.i((0, ..))?.to_vec1()?;
+        let mut tokens: Vec<u32> = input_ids.get(0)?.to_vec1()?;
         let mut logits = Tensor::zeros(
             (1, 1, self.config.vocab_size),
             candle_core::DType::F32,
