@@ -114,7 +114,6 @@ fn generate(model: &LLM, tokenizer: &MoETokenizer, prompt: &str, p: &GenParams) 
         p.top_k,
         p.top_p,
         p.repetition_penalty,
-        None,
     )?;
     let elapsed = start.elapsed().as_secs_f32();
 
