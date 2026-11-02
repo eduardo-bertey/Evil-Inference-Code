@@ -1,0 +1,12 @@
+jax
+jaxlib
+flax
+optax
+datasets
+huggingface_hub
+gcsfs
+transformers
+wandb
+pyyaml
+sentencepiece
+google-genai

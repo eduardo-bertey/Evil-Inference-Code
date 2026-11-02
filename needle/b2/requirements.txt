@@ -1,0 +1,7 @@
+huggingface_hub
+numpy
+jax
+jaxlib
+flax
+optax
+sentencepiece

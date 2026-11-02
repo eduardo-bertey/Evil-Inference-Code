@@ -1,0 +1,98 @@
+name: release
+
+# Weekly release train, Mondays at 09:00 America/Los_Angeles.
+# GitHub cron is UTC with no DST, so we fire at both UTC times that can map to
+# 09:00 Pacific (17:00 UTC during PST, 16:00 UTC during PDT) and let the gate job
+# keep only the run where it is actually 09:00 in Los Angeles. Also on-demand.
+on:
+  schedule:
+    - cron: "0 16 * * 1"
+    - cron: "0 17 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"        # manual runs always proceed
+          elif [ "$(TZ=America/Los_Angeles date +%H)" = "09" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"        # 09:00 Pacific
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"       # the other DST candidate; skip
+          fi
+
+  test:
+    needs: gate
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
+      - run: pytest -q -m "not slow"
+
+  release:
+    needs: [gate, test]
+    if: needs.gate.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write        # pushes the vX.Y.Z release tag
+      id-token: write        # required for PyPI Trusted Publishing (OIDC)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # tags are needed to derive the next version
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      # The version is not maintained in the repo: each release bumps the patch
+      # of the last v* tag (seeded from PyPI when no tags exist yet), patches it
+      # into this checkout only, and tags the released commit. If HEAD is
+      # already tagged, nothing landed since the last release and we skip.
+      # The engine wheel on HF is pinned separately (ENGINE_VERSION in
+      # needle/agent/fetch.py), so bumping here never breaks the lib fetch.
+      - id: version
+        run: |
+          last=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -n "$last" ] && [ "$(git rev-parse "$last^{commit}")" = "$(git rev-parse HEAD)" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$last" ]; then
+            last="v$(curl -s https://pypi.org/pypi/cactus-needle/json | python3 -c 'import json,sys; print(json.load(sys.stdin)["info"]["version"])')"
+          fi
+          echo "next=$(echo "${last#v}" | awk -F. '{printf "%d.%d.%d", $1, $2, $3 + 1}')" >> "$GITHUB_OUTPUT"
+      - if: steps.version.outputs.skip != 'true'
+        run: |
+          next="${{ steps.version.outputs.next }}"
+          sed -i "s/^version = \".*\"/version = \"$next\"/" pyproject.toml
+          sed -i "s/^__version__ = \".*\"/__version__ = \"$next\"/" needle/__init__.py
+      - if: steps.version.outputs.skip != 'true'
+        run: python -m build
+      - if: steps.version.outputs.skip != 'true'
+        run: twine check dist/*
+      # skip-existing keeps a rerun idempotent if the tag push below ever fails
+      # after a successful upload.
+      - if: steps.version.outputs.skip != 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+      - if: steps.version.outputs.skip != 'true'
+        run: |
+          git tag "v${{ steps.version.outputs.next }}"
+          git push origin "v${{ steps.version.outputs.next }}"
