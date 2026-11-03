@@ -217,6 +217,50 @@ def set_moe_forward_mode(model, mode, k=None, tau=None):
     return n
 
 
+@torch.no_grad()
+def dynk_usage(model, x, layer_ids=None):
+    """Cuántos expertos ejecuta cada capa por token (para verificar que NO
+    corre todo). Úsalo sobre un batch de input_ids.
+
+    Devuelve dict nombre → {'avg': expertos/token, 'min', 'max'}."""
+    ids = None if layer_ids is None else set(int(i) for i in layer_ids)
+    entries = [(n, m) for n, m in model.named_modules()
+               if isinstance(m, MoeficationMoE)
+               and (ids is None or layer_index_from_name(n) in ids)]
+    saved = {}
+    hooks = []
+    for n, m in entries:
+        hooks.append(m.register_forward_hook(
+            lambda mod, inp, out, key=id(m): saved.setdefault(key, inp[0].detach())))
+    prev_training = model.training
+    model.eval()
+    model(input_ids=x)
+    for h in hooks:
+        h.remove()
+    if prev_training:
+        model.train()
+    stats = {}
+    for n, m in entries:
+        inp = saved.get(id(m))
+        rt = m.gate(inp)  # [B, S, E] 0/1 en dynk (1.0 si modo all)
+        exec_counts = rt.sum(dim=-1)  # [B, S]
+        stats[n] = {"avg": float(exec_counts.mean()),
+                    "min": int(exec_counts.min()),
+                    "max": int(exec_counts.max()),
+                    "experts": m.num_experts,
+                    "mode": m.forward_mode}
+    return stats
+
+
+def print_dynk_usage(model, x, layer_ids=None):
+    stats = dynk_usage(model, x, layer_ids)
+    print(f"{'capa':30s} {'modo':6s} {'avg/tok':8s} {'min':4s} {'max':4s}")
+    for n, s in stats.items():
+        print(f"{n:30s} {s['mode']:6s} {s['avg']:8.2f} {s['min']:4d} {s['max']:4d}  "
+              f"({s['avg'] / s['experts'] * 100:.0f}% de {s['experts']})")
+    return stats
+
+
 # ---------- router training (paper: routers only, resto congelado) ----------
 
 def _moe_inputs(model, x):
@@ -278,7 +322,7 @@ def train_routers(model, tokens, seq_len, device, steps=500, batch_size=1,
         loss.backward()
         opt.step()
         if step == 1 or step % log_every == 0:
-            print(f"    router s{step}/{steps} loss {float(loss):.6f}", flush=True)
+            print(f"    router s{step}/{steps} loss {float(loss.detach()):.6f}", flush=True)
     model.train()
 
 
