@@ -24,7 +24,7 @@ y responde a lo que pregunta. Nada más.
 ## ¿Qué entrena?
 
 - **Turno actual**: solo las N capas del bloque activo (de arriba hacia abajo) + nada más. Las demás: congeladas, sean densas o MoE ya convertidas.
-- **d2dmoe progresivo**: el bloque que entra se convierte dense→MoE *en ese momento* (no todo junto), luego entrena sus routers (resto del modelo congelado, MSE contra ‖E_i(x)‖, como el paper) y después sus pesos completos en el turno.
+- **d2dmoe progresivo**: el bloque que entra se convierte dense→MoE *en ese momento* (no todo junto); su router (hidden ReLU + salida Abs, igual que el repo: `activation='relu', output_activation='abs'`) se entrena con el resto congelado (MSE contra ‖E_i(x)‖, Eq. 3 del paper) y después sus pesos completos en el turno.
 - **Al avanzar**: el bloque anterior se congela del todo y entra el siguiente.
 - **Resume**: la receta MoE (`arch`: expertos, swap_relu, bloques convertidos) viaja en el checkpoint → se reaplica sola y sigue donde quedaste.
 

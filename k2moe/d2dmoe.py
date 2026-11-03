@@ -28,6 +28,11 @@ _LAYER_RE = re.compile(r"\.layers\.(\d+)\.")
 _H_RE = re.compile(r"\.h\.(\d+)\.")
 
 
+class _Abs(nn.Module):
+    def forward(self, x):
+        return torch.abs(x)
+
+
 def layer_index_from_name(name: str):
     m = _LAYER_RE.search(name) or _H_RE.search(name)
     return int(m.group(1)) if m else None
@@ -73,22 +78,27 @@ def swap_ffn_activation_to_relu(model, layer_ids: Optional[Sequence[int]] = None
 
 
 class MoeficationRouter(nn.Module):
-    """Router MLP (2 capas por defecto), como en D2DMoE.
+    """Router MLP como en D2DMoE (scripts DSTI del paper):
+      activation='relu' (o 'tanh'), output_activation='abs'.
 
     Predicción no negativa (Abs al final): predice la norma ℓ2 del output
     de cada experto (regresión, Eq. 3 del paper)."""
 
-    def __init__(self, hidden_dim, num_experts, width=128, depth=2, bias=False):
+    _ACT = {"relu": nn.ReLU, "gelu": nn.GELU, "tanh": nn.Tanh, "silu": nn.SiLU}
+
+    def __init__(self, hidden_dim, num_experts, width=128, depth=2, bias=False,
+                 activation="relu"):
         super().__init__()
+        act = self._ACT[activation]
         layers = []
         if depth == 1:
             layers += [nn.Linear(hidden_dim, num_experts, bias=bias)]
         else:
-            layers += [nn.Linear(hidden_dim, width, bias=bias), nn.Tanh()]
+            layers += [nn.Linear(hidden_dim, width, bias=bias), act()]
             for _ in range(depth - 2):
-                layers += [nn.Linear(width, width, bias=bias), nn.Tanh()]
+                layers += [nn.Linear(width, width, bias=bias), act()]
             layers += [nn.Linear(width, num_experts, bias=bias)]
-        layers += [nn.Abs()]
+        layers += [_Abs()]
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):

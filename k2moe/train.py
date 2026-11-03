@@ -206,7 +206,7 @@ def main():
 
     fresh_moe = bool(arch) and arch.get("converted_blocks", 0) == 0
 
-    if arch and arch["converted_blocks"] != min(state["layer_block_idx"] + 1, len(blocks)):
+    if arch and arch["converted_blocks"] > state["layer_block_idx"] + 1:
         print(f"  AVISO: receta MoE dice {arch['converted_blocks']} bloque(s) convertidos pero "
               f"el estado está en bloque_capas {state['layer_block_idx'] + 1}; se usa la receta.")
 
