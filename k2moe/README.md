@@ -42,6 +42,25 @@ Files:
 | `plot.py` | `train_history.json` + plot (loss, líneas rojas = saltos) |
 | `checkpoint.py` | checkpoint + state, push a HF |
 | `d2dmoe.py` | dense→MoE (k-means de gate_proj) + routers + router training |
+| `inferk2.py` | variant sin joint training: carga EL modelo oficial, convierte cada bloque y solo entrena routers (10MB FineWeb), guarda en `tempk2`, chat con dynk/topk en caliente |
+
+## inferk2.py (solo router training + chat)
+
+```bash
+!python k2moe/inferk2.py
+```
+
+Carga el **oficial** `IFM/K2-Horizon-0.9B`, convierte cada bloque de 2 capas
+top-down dense→MoE y entrena SOLO su router (2500 steps, 10MB FineWeb).
+Checkpoints en `ScortexIA/laurelia@tempk2`. Al final, chat con comandos:
+
+- `:tau 0.5` — dynk con ese tau
+- `:topk 4` — top-k fijo (4 expertos/token)
+- `:dynk [tau]` — vuelve a dynk
+- `:all` — denso-equivalente
+- `:usage` — muestra expertos ejecutados por token
+- `:exit` — salir
+
 
 ## Continuar desde un checkpoint
 

@@ -161,6 +161,7 @@ needle2/
 
 # k2moe: artefactos locales de entrenamiento
 k2moe/k2moe_out/
+k2moe/inferk2_out/
 k2moe/k2moe_block_*.txt
 k2moe/fineweb_block_*.txt
 k2moe/train_history.json
