@@ -15,9 +15,10 @@ y responde a lo que pregunta. Nada más.
 3. **`Cuantas capas entrenar por turno (desde arriba)` [2]** — y **solo esas capas entrenan**: todo lo demás queda congelado siempre (otras capas densas o MoE ya convertidas, embeddings, norms, lm_head)
 4. **Avance de bloque** — elige uno:
    - `l` → **loss por tiempo**: `Minutos por bloque antes de saltar` [10] y `Caida de avg_loss para saltar antes` [0.05]
-   - `s` → **steps elegidos**: `Steps por bloque` [200]
+   - `s` → **steps elegidos**: `Steps por bloque (salto de capa)` [200]  
+   (el `Steps totales del run` [1000] del paso 6 es el tope total del entrenamiento, no el avance entre capas)
 5. **¿Aplicar d2dmoe progresivo?** [n] — si `s`, te pregunta: expertos por capa [32], swap SiLU/GELU→ReLU [s], y **router training por bloque** (steps [500], lr [1e-3], ancho [512])
-6. `Seq len` [1024], `Batch size` [1], `Grad accum` [8], `lr` [2e-5], `Steps` [1000]
+6. `Seq len` [1024], `Batch size` [1], `Grad accum` [8], `lr` [2e-5], `Steps totales del run` [1000]
 7. `Block de datos` [guardado]
 
 ## ¿Qué entrena?
@@ -45,6 +46,10 @@ Files:
 ## Continuar desde un checkpoint
 
 Si existe `k2moe_checkpoint.pt` (local o en HF), pregunta `¿Continuar desde ahí? [s/n]` y retoma step/block/capas + optimizer.
+
+## Requisitos (Colab)
+
+**Ninguno.** `train.py` instala solo lo que falte (`transformers`, `datasets`, `huggingface_hub`, `k-means-constrained`) la primera vez. No toca torch/CUDA. Si quieres preinstalarlo a mano: `!bash k2moe/setup.sh`.
 
 ## Datos
 

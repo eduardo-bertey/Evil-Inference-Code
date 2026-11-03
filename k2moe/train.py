@@ -35,6 +35,33 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 _DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _DIR)
 
+
+def _bootstrap():
+    """Instala con pip lo que falte (Colab). No toca torch/CUDA."""
+    import importlib
+    import subprocess
+    required = {"transformers": "transformers",
+                "datasets": "datasets",
+                "huggingface_hub": "huggingface_hub",
+                "k_means_constrained": "k-means-constrained"}
+    missing = [pkg for mod, pkg in required.items()
+               if _importable(mod) is False]
+    for pkg in missing:
+        print(f"... instalando {pkg}")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", pkg])
+
+
+def _importable(mod):
+    try:
+        import importlib
+        importlib.import_module(mod)
+        return True
+    except ImportError:
+        return False
+
+
+_bootstrap()
+
 import torch
 
 import checkpoint
@@ -76,7 +103,7 @@ def main():
     layers_per_block = int(input("Cuantas capas entrenar por turno (desde arriba) [2]: ").strip() or 2)
     salto = input("Avance de bloque (l=loss por tiempo, s=steps) [l]: ").strip().lower() or "l"
     if salto == "s":
-        steps_per_block = int(input("Steps por bloque [200]: ").strip() or 200)
+        steps_per_block = int(input("Steps por bloque (salto de capa) [200]: ").strip() or 200)
         block_minutes, loss_delta = None, None
         print(f"Avance por steps: cada {steps_per_block} steps")
     else:
@@ -89,7 +116,7 @@ def main():
     bs = int(input("Batch size [1]: ").strip() or 1)
     ga = int(input("Grad accum [8]: ").strip() or 8)
     lr = float(input("lr [2e-5]: ").strip() or 2e-5)
-    max_steps = int(input("Steps [1000]: ").strip() or 1000)
+    max_steps = int(input("Steps totales del run [1000]: ").strip() or 1000)
 
     # ¿checkpoint previo?
     state = checkpoint.default_state()

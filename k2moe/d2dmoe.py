@@ -275,8 +275,22 @@ def train_routers(model, tokens, seq_len, device, steps=500, batch_size=1,
 @torch.no_grad()
 def split_ffn_into_experts(ffn, moe: MoeficationMoE):
     """Reparte las neuronas del FFN en expertos por k-means restringido
-    sobre gate_proj normalizado. Requiere: pip install k-means-constrained"""
-    from k_means_constrained import KMeansConstrained
+    sobre gate_proj normalizado. Si falta k-means-constrained, intenta
+    instalarlo con pip; si no, falla con instrucción clara."""
+    try:
+        from k_means_constrained import KMeansConstrained
+    except ImportError:
+        import subprocess
+        import sys
+        print("  k-means-constrained no está; instalando con pip...")
+        try:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "-q",
+                                   "k-means-constrained"])
+            from k_means_constrained import KMeansConstrained
+        except Exception as e:
+            raise ImportError(
+                "Falta k-means-constrained. Instálalo en Colab con: "
+                "!pip install k-means-constrained") from e
     w = ffn.gate_proj.weight  # [d_ff, hidden]
     labels = KMeansConstrained(n_clusters=moe.num_experts,
                                size_min=moe.expert_dim,
