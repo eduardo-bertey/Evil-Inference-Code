@@ -159,6 +159,14 @@ rust/input.txt
 /rust/moe-mla - copia
 needle2/
 
+# k2moe: artefactos locales de entrenamiento
+k2moe/k2moe_out/
+k2moe/k2moe_block_*.txt
+k2moe/fineweb_block_*.txt
+k2moe/train_history.json
+k2moe/plot_train_step_*.png
+k2moe/md5_*.json*
+
 # RAG index (generado localmente) y repo vendorizado
 .rag_index/
 .tmp_dbg/
