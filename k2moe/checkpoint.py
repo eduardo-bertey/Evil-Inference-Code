@@ -21,7 +21,7 @@ OUT_DIR = os.path.join(_DIR, "k2moe_out")
 def default_state():
     return {"step": 0, "block_idx": 0, "layer_block_idx": 0,
             "steps_in_block": 0, "block_base_avg": None,
-            "block_start_time": None, "done": False}
+            "block_start_time": None, "arch": None, "done": False}
 
 
 def save_state(state):

@@ -73,7 +73,10 @@ def swap_ffn_activation_to_relu(model, layer_ids: Optional[Sequence[int]] = None
 
 
 class MoeficationRouter(nn.Module):
-    """Router MLP (2 capas por defecto), como en D2DMoE."""
+    """Router MLP (2 capas por defecto), como en D2DMoE.
+
+    Predicción no negativa (Abs al final): predice la norma ℓ2 del output
+    de cada experto (regresión, Eq. 3 del paper)."""
 
     def __init__(self, hidden_dim, num_experts, width=128, depth=2, bias=False):
         super().__init__()
@@ -85,10 +88,28 @@ class MoeficationRouter(nn.Module):
             for _ in range(depth - 2):
                 layers += [nn.Linear(width, width, bias=bias), nn.Tanh()]
             layers += [nn.Linear(width, num_experts, bias=bias)]
+        layers += [nn.Abs()]
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
         return self.net(x)
+
+
+def add_routers(model, layer_ids=None, width=128, depth=2, bias=False):
+    """Añade (o reemplaza) routers en las MoeficationMoE. Devuelve cuántas."""
+    ids = None if layer_ids is None else set(int(i) for i in layer_ids)
+    n = 0
+    for name, m in model.named_modules():
+        if not isinstance(m, MoeficationMoE):
+            continue
+        idx = layer_index_from_name(name)
+        if ids is not None and idx not in ids:
+            continue
+        m.router = MoeficationRouter(m.hidden_dim, m.num_experts,
+                                     width=width, depth=depth, bias=bias)
+        n += 1
+        print(f"  router añadido en {name} (width={width}, depth={depth})")
+    return n
 
 
 class _Expert(nn.Sequential):
@@ -165,6 +186,71 @@ class MoeficationMoE(nn.Module):
         return out, {"routing": rt}
 
 
+# ---------- router training (paper: routers only, resto congelado) ----------
+
+def _moe_inputs(model, x):
+    entries = [(n, m) for n, m in model.named_modules() if isinstance(m, MoeficationMoE)]
+    saved = {}
+    hooks = []
+    for n, m in entries:
+        hooks.append(m.register_forward_hook(
+            lambda mod, inp, out, key=id(m): saved.setdefault(key, inp[0].detach())))
+    model(input_ids=x)
+    for h in hooks:
+        h.remove()
+    return [(n, m, saved.get(id(m))) for n, m in entries]
+
+
+def train_routers(model, tokens, seq_len, device, steps=500, batch_size=1,
+                  lr=1e-3, width=128, depth=2, log_every=25, seed=42,
+                  layer_ids=None):
+    """Router training estilo D2DMoE: congela el modelo y entrena SOLO routers.
+
+    Loss = MSE(router(x), ||E_i(x)||_2)  (Ec. 3 del paper)
+    layer_ids: si se pasa, solo routers de esas capas (los demás congelados).
+    """
+    moe_entries = [(n, m) for n, m in model.named_modules()
+                   if isinstance(m, MoeficationMoE)
+                   and (layer_ids is None or layer_index_from_name(n) in set(layer_ids))]
+    if not moe_entries:
+        print("  train_routers: no hay capas MoE en el modelo")
+        return
+    p0 = next(model.parameters())
+    for n, m in moe_entries:
+        if m.router is None:
+            m.router = MoeficationRouter(m.hidden_dim, m.num_experts,
+                                         width=width, depth=depth)
+        m.router.to(device=device, dtype=p0.dtype)
+    for p in model.parameters():
+        p.requires_grad_(False)
+    for _, m in moe_entries:
+        for p in m.router.parameters():
+            p.requires_grad_(True)
+    model.eval()
+    opt = torch.optim.AdamW(
+        [p for _, m in moe_entries for p in m.router.parameters()], lr=lr)
+    g = torch.Generator().manual_seed(seed)
+    max_off = max(1, len(tokens) - seq_len - 1)
+    print(f"  Router training: {len(moe_entries)} MoE | {steps} steps | lr {lr} | bs {batch_size}")
+    for step in range(1, steps + 1):
+        offs = [int(torch.randint(0, max_off, (1,), generator=g)) for _ in range(batch_size)]
+        x = torch.tensor([tokens[o:o + seq_len] for o in offs], dtype=torch.long, device=device)
+        entries = _moe_inputs(model, x)
+        losses = []
+        for n, m, inp in entries:
+            with torch.no_grad():
+                targets = torch.stack(
+                    [e(inp).pow(2).sum(-1).sqrt() for e in m.experts], dim=-1)
+            losses.append(torch.nn.functional.mse_loss(m.router(inp), targets))
+        loss = torch.stack(losses).mean()
+        opt.zero_grad(set_to_none=True)
+        loss.backward()
+        opt.step()
+        if step == 1 or step % log_every == 0:
+            print(f"    router s{step}/{steps} loss {float(loss):.6f}", flush=True)
+    model.train()
+
+
 @torch.no_grad()
 def split_ffn_into_experts(ffn, moe: MoeficationMoE):
     """Reparte las neuronas del FFN en expertos por k-means restringido
@@ -189,11 +275,11 @@ def split_ffn_into_experts(ffn, moe: MoeficationMoE):
 
 
 def replace_with_moes(model, num_experts: int, layer_ids: Optional[Sequence[int]] = None,
-                      activation=nn.ReLU):
+                      activation=nn.ReLU, split_weights: bool = True):
     """Sustituye MLPs gated por MoeficationMoE (todas o solo layer_ids).
 
-    Devuelve los nombres reemplazados. Los expertos quedan sin router
-    (añadir MoeficationRouter si se quiere gating)."""
+    split_weights=False salta el k-means (los pesos vienen de un checkpoint,
+    p.ej. al retomar). Devuelve los nombres reemplazados."""
     import torch.nn as _nn
     replaced = []
     for idx, name, ffn in find_gated_mlps(model, layer_ids):
@@ -201,8 +287,9 @@ def replace_with_moes(model, num_experts: int, layer_ids: Optional[Sequence[int]
         moe = MoeficationMoE(hidden, d_ff, num_experts,
                              activation=activation,
                              gated=True, bias=ffn.gate_proj.bias is not None)
-        with torch.no_grad():
-            split_ffn_into_experts(ffn, moe)
+        if split_weights:
+            with torch.no_grad():
+                split_ffn_into_experts(ffn, moe)
         parent_name, attr = name.rsplit(".", 1)
         parent = model.get_submodule(parent_name) if parent_name else model
         assert isinstance(parent, _nn.Module)

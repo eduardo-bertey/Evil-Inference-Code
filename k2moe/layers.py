@@ -24,13 +24,15 @@ def top_down_blocks(n_layers, per_block):
     return blocks
 
 
-def apply_freeze(model, layers, n_active_blocks, blocks):
-    """Deja entrenables los primeros n_active_blocks bloques (top-down) +
-    todo lo que no sea una capa del transformer (embeddings/norms/lm_head)."""
-    trainable = set()
-    for i in range(min(n_active_blocks, len(blocks))):
-        trainable.update(blocks[i])
+def freeze_all_except_block(model, layers, block_index, blocks):
+    """Entrena SOLO el bloque `block_index` (de arriba hacia abajo).
+
+    TODO lo demás queda congelado: otras capas (densas o MoE convertidas),
+    embeddings, norms y lm_head. Devuelve las capas entrenables."""
+    active = set(int(x) for x in blocks[block_index])
+    for p in model.parameters():
+        p.requires_grad = False
     for i, layer in enumerate(layers):
         for p in layer.parameters():
-            p.requires_grad = (i in trainable)
-    return sorted(trainable)
+            p.requires_grad = (i in active)
+    return sorted(active)

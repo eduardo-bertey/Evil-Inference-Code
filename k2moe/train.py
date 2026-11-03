@@ -3,15 +3,15 @@
 Ejecuta:
   !python k2moe/train.py
 
-Pregunta solo lo básico: repo HF, rama, token, precisión, capas por bloque,
-salto de bloque (loss o steps), lr, steps y block de datos.
+Pregunta solo lo básico: repo HF, rama, token, precisión, cuántas capas
+entrenar por turno, salto de bloque (loss por tiempo o steps), lr, steps y
+block de datos.
 
-Empieza entrenando el bloque SUPERIOR de capas (+ embeddings/norms/lm_head).
-El salto al siguiente bloque hacia abajo se elige por:
-  - loss por tiempo: avanza si avg_loss cae >= delta, o si el bloque lleva
-    X minutos sin bajar suficiente
-  - steps elegidos: avanza cada N steps
-Al agotar todos los bloques el modelo queda completo.
+Entrena SOLO el bloque activo (N capas, de arriba hacia abajo). Todo lo demás
+queda congelado: otras capas (densas o MoE ya convertidas), embeddings, norms
+y lm_head. Con d2dmoe progresivo, el bloque que entra se convierte dense→MoE
+en ese momento y se entrenan sus routers (resto congelado). Al agotar todos
+los bloques el modelo queda completo.
 
 Checkpoints en HF (modelo + optimizer + estado): si ya existe uno (local o
 en el repo/rama) te pregunta si quieres continuar desde ahí.
@@ -71,7 +71,7 @@ def main():
     prec = input("Precision (n=f32, b=bf16) [b]: ").strip().lower() or "b"
     dtype = torch.bfloat16 if prec == "b" else torch.float32
 
-    layers_per_block = int(input("Capas por bloque (desde arriba) [2]: ").strip() or 2)
+    layers_per_block = int(input("Cuantas capas entrenar por turno (desde arriba) [2]: ").strip() or 2)
     salto = input("Avance de bloque (l=loss por tiempo, s=steps) [l]: ").strip().lower() or "l"
     if salto == "s":
         steps_per_block = int(input("Steps por bloque [200]: ").strip() or 200)
@@ -104,7 +104,7 @@ def main():
             state.update({k: ck.get(k, state[k]) for k in
                           ("step", "block_idx", "layer_block_idx",
                            "steps_in_block", "block_base_avg",
-                           "block_start_time", "done")})
+                           "block_start_time", "arch", "done")})
         else:
             ck = None
             print("Empezando de cero (el checkpoint se sobrescribirá al guardar).")
@@ -112,6 +112,25 @@ def main():
     if state["done"]:
         print("Este checkpoint ya completó todos los bloques.")
         return
+
+    # ¿d2dmoe progresivo? (la receta viaja guardada en el checkpoint; al
+    # retomar se reaplican las MISMAS conversiones antes de cargar pesos)
+    if state.get("arch") is None:
+        resp = input("¿Aplicar d2dmoe progresivo (convertir a MoE bloque a bloque)? [n]: ").strip().lower() or "n"
+        if resp == "s":
+            n_exp = int(input("Expertos por capa [32]: ").strip() or 32)
+            swap = input("¿Cambiar SiLU/GELU -> ReLU en las capas convertidas? [s]: ").strip().lower() or "s"
+            r_steps = int(input("Steps de router por bloque convertido (0 = no entrenar routers) [500]: ").strip() or 500)
+            r_lr = float(input("lr router [1e-3]: ").strip() or 1e-3)
+            r_width = int(input("Ancho del router [512]: ").strip() or 512)
+            state["arch"] = {"moe": True, "num_experts": n_exp,
+                             "swap_relu": swap == "s", "converted_blocks": 0,
+                             "router_steps": r_steps, "router_lr": r_lr,
+                             "router_width": r_width}
+    arch = state.get("arch")
+    if arch:
+        print(f"d2dmoe progresivo: {arch['num_experts']} expertos/capa | "
+              f"swap_relu={arch['swap_relu']} | bloques convertidos: {arch['converted_blocks']}")
 
     bi = input(f"Block de datos [{state['block_idx']}]: ").strip()
     state["block_idx"] = int(bi) if bi else state["block_idx"]
@@ -127,21 +146,70 @@ def main():
         BASE, dtype=dtype, low_cpu_mem_usage=True,
         device_map="auto", trust_remote_code=True)
     model.config.use_cache = False
-    if ck is not None:
-        missing, unexpected = model.load_state_dict(ck["model"], strict=False)
-        print(f"Pesos cargados (missing={len(missing)}, unexpected={len(unexpected)})")
-        del ck
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
 
     layers = layerlib.get_layers(model)
     blocks = layerlib.top_down_blocks(len(layers), layers_per_block)
     print(f"{len(layers)} capas | bloques top-down: {blocks}")
-    n_active = min(state["layer_block_idx"] + 1, len(blocks))
-    trainable_layers = layerlib.apply_freeze(model, layers, n_active, blocks)
+
+    # d2dmoe (dense -> MoE) bloque a bloque: reaplica conversiones al retomar,
+    # o convierte el bloque superior en un run nuevo
+    arch = state.get("arch")
+
+    def convert_block(k, split_weights):
+        import d2dmoe
+        if arch["swap_relu"]:
+            d2dmoe.swap_ffn_activation_to_relu(model, blocks[k])
+        d2dmoe.replace_with_moes(model, arch["num_experts"], blocks[k],
+                                 split_weights=split_weights)
+        arch["converted_blocks"] = k + 1
+
+    def train_block_routers(k):
+        if not arch or arch.get("router_steps", 0) <= 0:
+            return
+        import d2dmoe
+        print(f"Entrenando routers del bloque {k + 1} ({arch['router_steps']} steps)...")
+        d2dmoe.add_routers(model, layer_ids=blocks[k], width=arch["router_width"])
+        d2dmoe.train_routers(model, sd.get_tokens(), seq_len, device,
+                             steps=arch["router_steps"], lr=arch["router_lr"],
+                             width=arch["router_width"],
+                             layer_ids=blocks[k])
+
+    fresh_moe = bool(arch) and arch.get("converted_blocks", 0) == 0
+
+    if arch and arch["converted_blocks"] != min(state["layer_block_idx"] + 1, len(blocks)):
+        print(f"  AVISO: receta MoE dice {arch['converted_blocks']} bloque(s) convertidos pero "
+              f"el estado está en bloque_capas {state['layer_block_idx'] + 1}; se usa la receta.")
+
+    if arch:
+        k_done = arch["converted_blocks"]
+        if k_done > 0:
+            print(f"Reaplicando dense->MoE en {k_done} bloque(s) ya convertidos...")
+            for i in range(k_done):
+                convert_block(i, split_weights=False)
+        else:
+            print("dense -> MoE: convirtiendo el bloque superior (bloque 1)...")
+            convert_block(0, split_weights=True)
+
+    # datos primero: el router training los necesita
+    sd = fineweb.FineWebBlocks(block_idx=state["block_idx"])
+    sd.load_tokens(TokWrap(tok))
+    if fresh_moe:
+        train_block_routers(0)
+
+    if ck is not None:
+        missing, unexpected = model.load_state_dict(ck["model"], strict=False)
+        print(f"Pesos cargados (missing={len(missing)}, unexpected={len(unexpected)})")
+        if unexpected:
+            print(f"  AVISO: {len(unexpected)} claves del checkpoint no existen en el modelo — ¿receta MoE distinta?")
+        del ck
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    cur = min(state["layer_block_idx"], len(blocks) - 1)
+    trainable_layers = layerlib.freeze_all_except_block(model, layers, cur, blocks)
     n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Bloques activos: {n_active}/{len(blocks)} | capas entrenables: {trainable_layers} | "
-          f"params: {n_params:,}")
+    print(f"Entrenando SOLO bloque {cur + 1}/{len(blocks)} (capas {trainable_layers}) | "
+          f"resto congelado | params: {n_params:,}")
 
     opt = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=lr)
     if state["step"] > 0:
@@ -153,9 +221,6 @@ def main():
             except Exception as e:
                 print(f"  optimizer no cargado ({e}), AdamW fresco")
             del ck
-
-    sd = fineweb.FineWebBlocks(block_idx=state["block_idx"])
-    sd.load_tokens(TokWrap(tok))
 
     step = state["step"]
     recent = deque(maxlen=LOSS_WINDOW)
@@ -228,6 +293,12 @@ def main():
                             print(f"  avg_loss {avg:.4f} | caida {drop:.4f} | {elapsed:.1f}/{block_minutes} min")
                     if advance:
                         state["layer_block_idx"] += 1
+                        # dense -> MoE: el bloque que entra a entrenar se convierte AHORA
+                        if arch and arch["converted_blocks"] == state["layer_block_idx"]:
+                            print(f"dense -> MoE: convirtiendo bloque {state['layer_block_idx'] + 1} "
+                                  f"(capas {sorted(blocks[state['layer_block_idx']])})...")
+                            convert_block(state["layer_block_idx"], split_weights=True)
+                            train_block_routers(state["layer_block_idx"])
                         state["steps_in_block"] = 0
                         state["block_base_avg"] = None
                         state["block_start_time"] = time.time()
@@ -243,9 +314,10 @@ def main():
                                                 f"k2moe done step {step}")
                             print(f"Fin. Subido a {repo}@{branch}")
                             return
-                        n_active = state["layer_block_idx"] + 1
-                        trainable_layers = layerlib.apply_freeze(model, layers, n_active, blocks)
-                        print(f"AVANCE -> bloques {n_active}/{len(blocks)} | capas: {trainable_layers}")
+                        trainable_layers = layerlib.freeze_all_except_block(
+                            model, layers, state["layer_block_idx"], blocks)
+                        print(f"AVANCE -> bloque {state['layer_block_idx'] + 1}/{len(blocks)} | "
+                              f"capas: {trainable_layers} (resto congelado)")
                         opt = torch.optim.AdamW((p for p in model.parameters() if p.requires_grad), lr=lr)
                         recent.clear()
                         plot.plot(step)
