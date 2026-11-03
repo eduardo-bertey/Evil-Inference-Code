@@ -329,9 +329,11 @@ def replace_with_moes(model, num_experts: int, layer_ids: Optional[Sequence[int]
     replaced = []
     for idx, name, ffn in find_gated_mlps(model, layer_ids):
         hidden, d_ff = ffn.gate_proj.in_features, ffn.gate_proj.out_features
+        ref_param = next(ffn.parameters())
         moe = MoeficationMoE(hidden, d_ff, num_experts,
                              activation=activation,
                              gated=True, bias=ffn.gate_proj.bias is not None)
+        moe.to(device=ref_param.device, dtype=ref_param.dtype)
         if split_weights:
             with torch.no_grad():
                 split_ffn_into_experts(ffn, moe)
