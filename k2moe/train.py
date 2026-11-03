@@ -3,9 +3,9 @@
 Ejecuta:
   !python k2moe/train.py
 
-Pregunta solo lo básico: repo HF, rama, token, precisión, cuántas capas
+Pregunta solo lo básico: token, precisión, cuántas capas
 entrenar por turno, salto de bloque (loss por tiempo o steps), lr, steps y
-block de datos.
+block de datos. Repo y rama son fijos: ScortexIA/laurelia@k2moe.
 
 Entrena SOLO el bloque activo (N capas, de arriba hacia abajo). Todo lo demás
 queda congelado: otras capas (densas o MoE ya convertidas), embeddings, norms
@@ -44,6 +44,8 @@ import layers as layerlib
 import plot
 
 BASE = "IFM/K2-Horizon-0.9B"
+REPO = "ScortexIA/laurelia"  # repo único del proyecto (como rebuild/); cambia solo esto
+BRANCH = "k2moe"              # rama fija
 EVAL_EVERY = 20        # cada cuantos steps se mira el avg_loss
 LOSS_WINDOW = 20       # ventana para el avg_loss
 SAVE_MINUTES = 20.0    # cada cuantos minutos sube checkpoint a HF
@@ -62,8 +64,8 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Device: {device}\n")
 
-    repo = input("Repo HF destino [ScortexIA/laurelia]: ").strip() or "ScortexIA/laurelia"
-    branch = input("Rama [k2moe]: ").strip() or "k2moe"
+    repo = REPO
+    branch = BRANCH
     token = hf.hf_token(repo)
     api = hf.hf_api(token)
     hf.hf_ensure_repo_branch(api, repo, branch, token)
@@ -123,10 +125,11 @@ def main():
             r_steps = int(input("Steps de router por bloque convertido (0 = no entrenar routers) [500]: ").strip() or 500)
             r_lr = float(input("lr router [1e-3]: ").strip() or 1e-3)
             r_width = int(input("Ancho del router [512]: ").strip() or 512)
+            tau = float(input("Tau dynk para inferencia final [0.9]: ").strip() or 0.9)
             state["arch"] = {"moe": True, "num_experts": n_exp,
                              "swap_relu": swap == "s", "converted_blocks": 0,
                              "router_steps": r_steps, "router_lr": r_lr,
-                             "router_width": r_width}
+                             "router_width": r_width, "dynk_tau": tau}
     arch = state.get("arch")
     if arch:
         print(f"d2dmoe progresivo: {arch['num_experts']} expertos/capa | "
@@ -305,6 +308,10 @@ def main():
                         if state["layer_block_idx"] >= len(blocks):
                             state["done"] = True
                             print("Todos los bloques entrenados.")
+                            if arch:
+                                import d2dmoe
+                                d2dmoe.set_moe_forward_mode(model, "dynk",
+                                                            tau=arch.get("dynk_tau", 0.9))
                             plot.plot(step)
                             checkpoint.save_checkpoint(model, opt, state)
                             checkpoint.push_checkpoint(api, repo, branch, token, step)
@@ -334,6 +341,9 @@ def main():
         state["block_idx"] = sd.block_idx
 
     state["block_idx"] = sd.block_idx
+    if arch:
+        import d2dmoe
+        d2dmoe.set_moe_forward_mode(model, "dynk", tau=arch.get("dynk_tau", 0.9))
     plot.plot(step)
     checkpoint.save_checkpoint(model, opt, state)
     model.save_pretrained(checkpoint.OUT_DIR)

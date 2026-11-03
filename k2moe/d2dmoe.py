@@ -186,6 +186,27 @@ class MoeficationMoE(nn.Module):
         return out, {"routing": rt}
 
 
+def set_moe_forward_mode(model, mode, k=None, tau=None):
+    """Cambia el forward_mode de todas las MoeficationMoE.
+
+    'all'  -> denso-equivalente (equivale a FFN original; usar en entrenamiento)
+    'topk' -> top-k por router
+    'dynk' -> dynamic-k (Eq. 4 del paper; usar en inferencia)
+    """
+    n = 0
+    for m in model.modules():
+        if isinstance(m, MoeficationMoE):
+            m.forward_mode = mode
+            if k is not None:
+                m.k = min(int(k), m.num_experts)
+            if tau is not None:
+                m.tau = float(tau)
+            n += 1
+    print(f"forward_mode -> {mode} en {n} capas MoE" +
+          (f" (k={k})" if k is not None else f" (tau={tau})" if tau is not None else ""))
+    return n
+
+
 # ---------- router training (paper: routers only, resto congelado) ----------
 
 def _moe_inputs(model, x):
